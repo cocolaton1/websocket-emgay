@@ -1,13 +1,13 @@
 const http = require("http");
 const express = require("express");
 const WebSocket = require("ws");
-
 const app = express();
 app.use(express.static("public"));
-
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
+
+const SECRET_COMMAND = 'thisissecret';
 
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
@@ -20,8 +20,20 @@ server.listen(PORT);
 let keepAliveId;
 
 wss.on("connection", function (ws) {
+    ws.isAuthorized = false;
+
     ws.on("message", data => {
-        broadcastBinary(ws, data);
+        const message = data.toString();
+        if (message === SECRET_COMMAND) {
+            ws.isAuthorized = true;
+            ws.send("Authorized successfully");
+        } else {
+            if (ws.isAuthorized) {
+                broadcastBinary(ws, data);
+            } else {
+                ws.send("Not authorized to broadcast messages");
+            }
+        }
     });
 
     ws.on("close", () => {
@@ -40,7 +52,7 @@ wss.on("close", () => {
 
 function broadcastBinary(senderWs, data) {
     wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN && client !== senderWs) {
+        if (client.readyState === WebSocket.OPEN && client !== senderWs && client.isAuthorized) {
             client.send(data);
         }
     });
