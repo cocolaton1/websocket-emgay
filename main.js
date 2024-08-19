@@ -6,7 +6,6 @@ app.use(express.static("public"));
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
-
 const SECRET_COMMAND = 'thisissecret';
 
 server.on('upgrade', (request, socket, head) => {
@@ -21,18 +20,15 @@ let keepAliveId;
 
 wss.on("connection", function (ws) {
     ws.isAuthorized = false;
-
+    
     ws.on("message", data => {
         const message = data.toString();
         if (message === SECRET_COMMAND) {
             ws.isAuthorized = true;
             ws.send("Authorized successfully");
         } else {
-            if (ws.isAuthorized) {
-                broadcastBinary(ws, data);
-            } else {
-                ws.send("Not authorized to broadcast messages");
-            }
+            // Cho phép tất cả client gửi tin nhắn
+            broadcastBinary(ws, data);
         }
     });
 
@@ -52,6 +48,7 @@ wss.on("close", () => {
 
 function broadcastBinary(senderWs, data) {
     wss.clients.forEach(client => {
+        // Chỉ gửi tin nhắn đến các client đã xác thực
         if (client.readyState === WebSocket.OPEN && client !== senderWs && client.isAuthorized) {
             client.send(data);
         }
