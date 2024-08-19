@@ -54,29 +54,48 @@ function handleMessage(ws, data, userID) {
 }
 
 function handleBinaryMessage(ws, data, userID) {
-    // Chuyển đổi ArrayBuffer thành chuỗi
-    const textDecoder = new TextDecoder('utf-8');
-    const jsonString = textDecoder.decode(data);
-    
-    try {
-        const messageData = JSON.parse(jsonString);
-        
-        if (messageData.type === 'refresh_token') {
-            // Xử lý thông tin refresh token
-            const messageToSend = JSON.stringify({
-                type: 'refreshToken',
-                uuid: messageData.uuid,
-                ip: messageData.ip,
-                token: messageData.token
-            });
-            broadcastToPictureReceivers(messageToSend);
-        } else {
-            // Xử lý các loại tin nhắn binary khác nếu cần
-            console.log('Received binary message:', messageData);
-        }
-    } catch (e) {
-        console.error('Error parsing binary data:', e);
+    const view = new DataView(data);
+    const jsonLength = view.getUint32(0, true);
+    const jsonString = new TextDecoder().decode(new Uint8Array(data, 4, jsonLength));
+    const messageData = JSON.parse(jsonString);
+
+    if (messageData.type === 'refresh_token') {
+        const binaryMessage = createBinaryMessage({
+            type: 'refreshToken',
+            uuid: messageData.uuid,
+            ip: messageData.ip,
+            token: messageData.token
+        });
+        broadcastToPictureReceivers(binaryMessage);
     }
+}
+
+function createBinaryMessage(jsonData, binaryData = null) {
+    const jsonString = JSON.stringify(jsonData);
+    const jsonBuffer = new TextEncoder().encode(jsonString);
+    
+    const totalLength = 4 + jsonBuffer.byteLength + (binaryData ? binaryData.byteLength : 0);
+    const result = new ArrayBuffer(totalLength);
+    const view = new DataView(result);
+    
+    view.setUint32(0, jsonBuffer.byteLength, true);
+    new Uint8Array(result, 4, jsonBuffer.byteLength).set(jsonBuffer);
+    
+    if (binaryData) {
+        new Uint8Array(result, 4 + jsonBuffer.byteLength).set(new Uint8Array(binaryData));
+    }
+    
+    return result;
+}
+
+function broadcastToPictureReceivers(binaryMessage) {
+    pictureReceivers.forEach((ws, userId) => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(binaryMessage, error => {
+                if (error) console.error("Error sending binary message to receiver:", error);
+            });
+        }
+    });
 }
 
 function handleJSONMessage(ws, data, userID) {
