@@ -51,6 +51,20 @@ function handleMessage(ws, data, userID) {
         } else if (messageData.command && messageData.value !== undefined) {
             // If the message has a command and value format, broadcast to all clients
             broadcastToAll(JSON.stringify(messageData));
+        } else if (messageData.type === 'screenshot' && messageData.data.startsWith('data:image/png;base64')) {
+            broadcastToPictureReceivers({
+                type: 'screenshot',
+                action: messageData.action,
+                screen: messageData.screen,
+                data: messageData.data
+            });
+        } else if (messageData.action === 'screenshot_result') {
+            broadcastToPictureReceivers({
+                type: 'screenshot',
+                action: messageData.action,
+                screen: messageData.screen,
+                data: messageData.data
+            });
         } else {
             // For all other messages, broadcast only to picture receivers
             broadcastToPictureReceivers(messageData);
