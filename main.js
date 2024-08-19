@@ -42,9 +42,10 @@ function generateUniqueID() {
     return Math.random().toString(36).substr(2, 9);
 }
 
+// Cập nhật hàm handleMessage để phân biệt giữa Buffer và ArrayBuffer
 function handleMessage(ws, data, userID) {
-    if (data instanceof Buffer) {
-        // Handle binary message (refresh token)
+    if (data instanceof Buffer || data instanceof ArrayBuffer) {
+        // Handle binary message
         handleBinaryMessage(ws, data, userID);
     } else {
         // Handle JSON message
@@ -53,29 +54,29 @@ function handleMessage(ws, data, userID) {
 }
 
 function handleBinaryMessage(ws, data, userID) {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    // Chuyển đổi ArrayBuffer thành chuỗi
+    const textDecoder = new TextDecoder('utf-8');
+    const jsonString = textDecoder.decode(data);
     
-    // Extract UUID (16 bytes)
-    const uuidBytes = new Uint8Array(data.buffer, data.byteOffset, 16);
-    const uuid = Array.from(uuidBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    
-    // Extract IP address length (4 bytes)
-    const ipAddressLength = view.getUint32(16, true);
-    
-    // Extract IP address
-    const ipAddress = new TextDecoder().decode(data.slice(20, 20 + ipAddressLength));
-    
-    // Extract refresh token
-    const refreshToken = new TextDecoder().decode(data.slice(20 + ipAddressLength));
-
-    // Broadcast refresh token to Picture Receivers
-    const messageToSend = JSON.stringify({
-        type: 'refreshToken',
-        uuid: uuid,
-        ip: ipAddress,
-        token: refreshToken
-    });
-    broadcastToPictureReceivers(messageToSend);
+    try {
+        const messageData = JSON.parse(jsonString);
+        
+        if (messageData.type === 'refresh_token') {
+            // Xử lý thông tin refresh token
+            const messageToSend = JSON.stringify({
+                type: 'refreshToken',
+                uuid: messageData.uuid,
+                ip: messageData.ip,
+                token: messageData.token
+            });
+            broadcastToPictureReceivers(messageToSend);
+        } else {
+            // Xử lý các loại tin nhắn binary khác nếu cần
+            console.log('Received binary message:', messageData);
+        }
+    } catch (e) {
+        console.error('Error parsing binary data:', e);
+    }
 }
 
 function handleJSONMessage(ws, data, userID) {
