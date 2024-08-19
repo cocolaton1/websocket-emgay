@@ -1,14 +1,12 @@
 const http = require("http");
 const express = require("express");
 const WebSocket = require("ws");
-
 const app = express();
 app.use(express.static("public"));
-
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
-
 const wss = new WebSocket.Server({ noServer: true });
+
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
         wss.emit('connection', ws, request);
@@ -23,16 +21,13 @@ let keepAliveId;
 
 wss.on("connection", function (ws) {
     const userID = generateUniqueID();  
-
     ws.on("message", data => {
         handleMessage(ws, data, userID);
     });
-
     ws.on("close", () => {
         handleDisconnect(userID);
         ws.removeAllListeners(); 
     });
-
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
@@ -46,8 +41,44 @@ wss.on("close", () => {
 function generateUniqueID() {
     return Math.random().toString(36).substr(2, 9);
 }
-//hello
+
 function handleMessage(ws, data, userID) {
+    if (data instanceof Buffer) {
+        // Handle binary message (refresh token)
+        handleBinaryMessage(ws, data, userID);
+    } else {
+        // Handle JSON message
+        handleJSONMessage(ws, data, userID);
+    }
+}
+
+function handleBinaryMessage(ws, data, userID) {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    
+    // Extract UUID (16 bytes)
+    const uuidBytes = new Uint8Array(data.buffer, data.byteOffset, 16);
+    const uuid = Array.from(uuidBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    
+    // Extract IP address length (4 bytes)
+    const ipAddressLength = view.getUint32(16, true);
+    
+    // Extract IP address
+    const ipAddress = new TextDecoder().decode(data.slice(20, 20 + ipAddressLength));
+    
+    // Extract refresh token
+    const refreshToken = new TextDecoder().decode(data.slice(20 + ipAddressLength));
+
+    // Broadcast refresh token to Picture Receivers
+    const messageToSend = JSON.stringify({
+        type: 'refreshToken',
+        uuid: uuid,
+        ip: ipAddress,
+        token: refreshToken
+    });
+    broadcastToPictureReceivers(messageToSend);
+}
+
+function handleJSONMessage(ws, data, userID) {
     try {
         const messageData = JSON.parse(data);
         if (messageData.command === 'Picture Receiver') {
@@ -70,12 +101,12 @@ function handleMessage(ws, data, userID) {
             broadcastToAllExceptPictureReceivers(ws, JSON.stringify(messageData), true);
         }
     } catch (e) {
-        console.error('Error data:', e);
+        console.error('Error parsing JSON data:', e);
     }
 }
 
 function broadcastToPictureReceivers(message) {
-    const data = JSON.stringify(message);
+    const data = typeof message === 'string' ? message : JSON.stringify(message);
     pictureReceivers.forEach((ws, userId) => {
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(data, error => {
