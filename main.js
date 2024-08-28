@@ -15,19 +15,22 @@ server.on('upgrade', (request, socket, head) => {
 
 server.listen(PORT);
 
-const usersInChat = new Map();
-const pictureReceivers = new Map(); 
+const rooms = new Map();
 let keepAliveId;
 
 wss.on("connection", function (ws) {
     const userID = generateUniqueID();  
+    ws.userID = userID;
+
     ws.on("message", data => {
-        handleMessage(ws, data, userID);
+        handleMessage(ws, data);
     });
+
     ws.on("close", () => {
-        handleDisconnect(userID);
+        handleDisconnect(ws);
         ws.removeAllListeners(); 
     });
+
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
@@ -42,65 +45,80 @@ function generateUniqueID() {
     return Math.random().toString(36).substr(2, 9);
 }
 
-function handleMessage(ws, data, userID) {
+function handleMessage(ws, data) {
     try {
-        const messageData = JSON.parse(data);
+        const message = JSON.parse(data);
         
-        if (messageData.command === 'Picture Receiver') {
-            pictureReceivers.set(userID, ws);
-        } else if (messageData.command && messageData.value !== undefined) {
-            // If the message has a command and value format, broadcast to all clients
-            broadcastToAll(JSON.stringify(messageData));
-        } else if (messageData.type && messageData.content !== undefined) {
-            // If the message has a command and value format, broadcast to all clients
-            broadcastToAll(JSON.stringify(messageData));
-        } else if (messageData.type === 'screenshot' && messageData.data.startsWith('data:image/png;base64')) {
-            broadcastToPictureReceivers({
-                type: 'screenshot',
-                action: messageData.action,
-                screen: messageData.screen,
-                data: messageData.data
-            });
-        } else if (messageData.action === 'screenshot_result') {
-            broadcastToPictureReceivers({
-                type: 'screenshot',
-                action: messageData.action,
-                screen: messageData.screen,
-                data: messageData.data
-            });
-        } else {
-            // For all other messages, broadcast only to picture receivers
-            broadcastToPictureReceivers(messageData);
+        switch(message.type) {
+            case 'join':
+                handleJoin(ws, message.roomId);
+                break;
+            case 'offer':
+                handleOffer(ws, message);
+                break;
+            case 'answer':
+                handleAnswer(ws, message);
+                break;
+            case 'ice-candidate':
+                handleIceCandidate(ws, message);
+                break;
+            case 'screenshot':
+                handleScreenshot(ws, message);
+                break;
+            default:
+                console.log('Unknown message type:', message.type);
         }
     } catch (e) {
-        console.error('Error parsing data:', e);
+        console.error('Error handling message:', e);
     }
 }
 
-function broadcastToPictureReceivers(message) {
-    const data = JSON.stringify(message);
-    pictureReceivers.forEach((ws, userId) => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(data, error => {
-                if (error) console.error("Error sending message to receiver:", error);
-            });
-        }
-    });
+function handleJoin(ws, roomId) {
+    if (!rooms.has(roomId)) {
+        rooms.set(roomId, new Set());
+    }
+    rooms.get(roomId).add(ws);
+    ws.roomId = roomId;
+    ws.send(JSON.stringify({ type: 'joined', roomId }));
 }
 
-function broadcastToAll(message) {
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(message, error => {
-                if (error) console.error("Error broadcasting message:", error);
-            });
-        }
-    });
+function handleOffer(ws, message) {
+    broadcastToRoom(ws, message, ws.roomId);
 }
 
-function handleDisconnect(userID) {
-    usersInChat.delete(userID);
-    pictureReceivers.delete(userID);
+function handleAnswer(ws, message) {
+    broadcastToRoom(ws, message, ws.roomId);
+}
+
+function handleIceCandidate(ws, message) {
+    broadcastToRoom(ws, message, ws.roomId);
+}
+
+function handleScreenshot(ws, message) {
+    broadcastToRoom(ws, message, ws.roomId);
+}
+
+function broadcastToRoom(sender, message, roomId) {
+    const room = rooms.get(roomId);
+    if (room) {
+        room.forEach(client => {
+            if (client !== sender && client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify(message));
+            }
+        });
+    }
+}
+
+function handleDisconnect(ws) {
+    if (ws.roomId) {
+        const room = rooms.get(ws.roomId);
+        if (room) {
+            room.delete(ws);
+            if (room.size === 0) {
+                rooms.delete(ws.roomId);
+            }
+        }
+    }
 }
 
 function keepServerAlive() {
