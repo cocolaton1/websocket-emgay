@@ -21,7 +21,7 @@ let keepAliveId;
 wss.on("connection", function (ws) {
     const userID = generateUniqueID();  
     ws.userID = userID;
-    
+
     ws.on("message", data => {
         handleMessage(ws, data);
     });
@@ -62,8 +62,8 @@ function handleMessage(ws, data) {
             case 'ice-candidate':
                 handleIceCandidate(ws, message);
                 break;
-            case 'host-ready':
-                handleHostReady(ws, message.roomId);
+            case 'screenshot':
+                handleScreenshot(ws, message);
                 break;
             default:
                 console.log('Unknown message type:', message.type);
@@ -75,61 +75,37 @@ function handleMessage(ws, data) {
 
 function handleJoin(ws, roomId) {
     if (!rooms.has(roomId)) {
-        rooms.set(roomId, { host: null, viewers: new Set() });
+        rooms.set(roomId, new Set());
     }
-    const room = rooms.get(roomId);
-    if (!room.host) {
-        room.host = ws;
-        ws.isHost = true;
-    } else {
-        room.viewers.add(ws);
-        ws.isHost = false;
-    }
+    rooms.get(roomId).add(ws);
     ws.roomId = roomId;
     ws.send(JSON.stringify({ type: 'joined', roomId }));
-    
-    if (room.host && !ws.isHost) {
-        room.host.send(JSON.stringify({ type: 'viewer-joined', viewerId: ws.userID }));
-    }
-}
-
-function handleHostReady(ws, roomId) {
-    const room = rooms.get(roomId);
-    if (room && room.host === ws) {
-        room.viewers.forEach(viewer => {
-            viewer.send(JSON.stringify({ type: 'host-ready' }));
-        });
-    }
 }
 
 function handleOffer(ws, message) {
-    const room = rooms.get(ws.roomId);
-    if (room && room.host === ws) {
-        const viewer = Array.from(room.viewers).find(v => v.userID === message.viewerId);
-        if (viewer) {
-            viewer.send(JSON.stringify(message));
-        }
-    }
+    broadcastToRoom(ws, message, ws.roomId);
 }
 
 function handleAnswer(ws, message) {
-    const room = rooms.get(ws.roomId);
-    if (room && !ws.isHost) {
-        room.host.send(JSON.stringify(message));
-    }
+    broadcastToRoom(ws, message, ws.roomId);
 }
 
 function handleIceCandidate(ws, message) {
-    const room = rooms.get(ws.roomId);
+    broadcastToRoom(ws, message, ws.roomId);
+}
+
+function handleScreenshot(ws, message) {
+    broadcastToRoom(ws, message, ws.roomId);
+}
+
+function broadcastToRoom(sender, message, roomId) {
+    const room = rooms.get(roomId);
     if (room) {
-        if (ws.isHost) {
-            const viewer = Array.from(room.viewers).find(v => v.userID === message.viewerId);
-            if (viewer) {
-                viewer.send(JSON.stringify(message));
+        room.forEach(client => {
+            if (client !== sender && client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify(message));
             }
-        } else {
-            room.host.send(JSON.stringify(message));
-        }
+        });
     }
 }
 
@@ -137,17 +113,9 @@ function handleDisconnect(ws) {
     if (ws.roomId) {
         const room = rooms.get(ws.roomId);
         if (room) {
-            if (ws.isHost) {
-                room.viewers.forEach(viewer => {
-                    viewer.send(JSON.stringify({ type: 'host-left' }));
-                    viewer.close();
-                });
+            room.delete(ws);
+            if (room.size === 0) {
                 rooms.delete(ws.roomId);
-            } else {
-                room.viewers.delete(ws);
-                if (room.host) {
-                    room.host.send(JSON.stringify({ type: 'viewer-left', viewerId: ws.userID }));
-                }
             }
         }
     }
