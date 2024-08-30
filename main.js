@@ -1,167 +1,45 @@
-const http = require("http");
-const express = require("express");
-const WebSocket = require("ws");
+const WebSocket = require('ws');
+const http = require('http');
+const express = require('express');
+
 const app = express();
-app.use(express.static("public"));
-const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ noServer: true });
+const wss = new WebSocket.Server({ server });
 
-server.on('upgrade', (request, socket, head) => {
-    wss.handleUpgrade(request, socket, head, ws => {
-        wss.emit('connection', ws, request);
-    });
+const FILE_TRANSFER_PREFIX = "FILE_TRANSFER:";
+
+wss.on('connection', function connection(ws) {
+  console.log('Client connected');
+
+  ws.on('message', function incoming(message) {
+    console.log('Received message');
+    if (typeof message === 'string' && message.startsWith(FILE_TRANSFER_PREFIX)) {
+      // File transfer metadata
+      console.log('Received file metadata');
+      const metadata = JSON.parse(message.slice(FILE_TRANSFER_PREFIX.length));
+      console.log('File transfer started:', metadata.fileName);
+      ws.fileMetadata = metadata;
+      ws.fileBuffer = Buffer.alloc(0);
+    } else if (ws.fileMetadata) {
+      // File chunk
+      ws.fileBuffer = Buffer.concat([ws.fileBuffer, message]);
+      console.log(`Received chunk. Total received: ${ws.fileBuffer.length} / ${ws.fileMetadata.fileSize} bytes`);
+      
+      if (ws.fileBuffer.length >= ws.fileMetadata.fileSize) {
+        console.log('File transfer completed:', ws.fileMetadata.fileName);
+        // Here you could save the file or process it as needed
+        delete ws.fileMetadata;
+        delete ws.fileBuffer;
+      }
+    }
+  });
+
+  ws.on('close', function close() {
+    console.log('Client disconnected');
+  });
 });
 
-server.listen(PORT);
-
-const rooms = new Map();
-let keepAliveId;
-
-wss.on("connection", function (ws) {
-    const userID = generateUniqueID();  
-    ws.userID = userID;
-    ws.on("message", data => {
-        handleMessage(ws, data);
-    });
-    ws.on("close", () => {
-        handleDisconnect(ws);
-        ws.removeAllListeners(); 
-    });
-    if (wss.clients.size === 1 && !keepAliveId) {
-        keepServerAlive();
-    }
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server is listening on port ${PORT}`);
 });
-
-wss.on("close", () => {
-    clearInterval(keepAliveId);
-    keepAliveId = null;
-});
-
-function generateUniqueID() {
-    return Math.random().toString(36).substr(2, 9);
-}
-
-function handleMessage(ws, data) {
-    if (typeof data === 'string') {
-        try {
-            const message = JSON.parse(data);
-            
-            switch(message.type) {
-                case 'join':
-                    handleJoin(ws, message.roomId);
-                    break;
-                case 'offer':
-                    handleOffer(ws, message);
-                    break;
-                case 'answer':
-                    handleAnswer(ws, message);
-                    break;
-                case 'ice-candidate':
-                    handleIceCandidate(ws, message);
-                    break;
-                case 'screenshot':
-                    handleScreenshot(ws, message);
-                    break;
-                case 'file-start':
-                    handleFileStart(ws, message);
-                    break;
-                default:
-                    console.log('Unknown message type:', message.type);
-            }
-        } catch (e) {
-            console.error('Error handling message:', e);
-        }
-    } else {
-        // Handle binary data (file chunks)
-        handleFileChunk(ws, data);
-    }
-}
-
-function handleJoin(ws, roomId) {
-    if (!rooms.has(roomId)) {
-        rooms.set(roomId, new Set());
-    }
-    rooms.get(roomId).add(ws);
-    ws.roomId = roomId;
-    ws.send(JSON.stringify({ type: 'joined', roomId }));
-}
-
-function handleOffer(ws, message) {
-    broadcastToRoom(ws, message, ws.roomId);
-}
-
-function handleAnswer(ws, message) {
-    broadcastToRoom(ws, message, ws.roomId);
-}
-
-function handleIceCandidate(ws, message) {
-    broadcastToRoom(ws, message, ws.roomId);
-}
-
-function handleScreenshot(ws, message) {
-    broadcastToRoom(ws, message, ws.roomId);
-}
-
-function handleFileStart(ws, message) {
-    ws.currentFile = {
-        name: message.fileName,
-        size: message.fileSize,
-        receivedSize: 0
-    };
-    broadcastToRoom(ws, message, ws.roomId);
-}
-
-function handleFileChunk(ws, data) {
-    if (ws.currentFile) {
-        ws.currentFile.receivedSize += data.length;
-        broadcastToRoom(ws, data, ws.roomId, true);
-        
-        if (ws.currentFile.receivedSize >= ws.currentFile.size) {
-            // File transfer completed
-            const completeMessage = JSON.stringify({
-                type: 'file-complete',
-                fileName: ws.currentFile.name
-            });
-            broadcastToRoom(ws, completeMessage, ws.roomId);
-            delete ws.currentFile;
-        }
-    }
-}
-
-function broadcastToRoom(sender, message, roomId, isBinary = false) {
-    const room = rooms.get(roomId);
-    if (room) {
-        room.forEach(client => {
-            if (client !== sender && client.readyState === WebSocket.OPEN) {
-                if (isBinary) {
-                    client.send(message, { binary: true });
-                } else {
-                    client.send(typeof message === 'string' ? message : JSON.stringify(message));
-                }
-            }
-        });
-    }
-}
-
-function handleDisconnect(ws) {
-    if (ws.roomId) {
-        const room = rooms.get(ws.roomId);
-        if (room) {
-            room.delete(ws);
-            if (room.size === 0) {
-                rooms.delete(ws.roomId);
-            }
-        }
-    }
-}
-
-function keepServerAlive() {
-    keepAliveId = setInterval(() => {
-        wss.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.ping(); 
-            }
-        });
-    }, 30000);
-}
