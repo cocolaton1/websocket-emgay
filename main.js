@@ -21,16 +21,13 @@ let keepAliveId;
 wss.on("connection", function (ws) {
     const userID = generateUniqueID();  
     ws.userID = userID;
-
     ws.on("message", data => {
         handleMessage(ws, data);
     });
-
     ws.on("close", () => {
         handleDisconnect(ws);
         ws.removeAllListeners(); 
     });
-
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
@@ -46,30 +43,38 @@ function generateUniqueID() {
 }
 
 function handleMessage(ws, data) {
-    try {
-        const message = JSON.parse(data);
-        
-        switch(message.type) {
-            case 'join':
-                handleJoin(ws, message.roomId);
-                break;
-            case 'offer':
-                handleOffer(ws, message);
-                break;
-            case 'answer':
-                handleAnswer(ws, message);
-                break;
-            case 'ice-candidate':
-                handleIceCandidate(ws, message);
-                break;
-            case 'screenshot':
-                handleScreenshot(ws, message);
-                break;
-            default:
-                console.log('Unknown message type:', message.type);
+    if (typeof data === 'string') {
+        try {
+            const message = JSON.parse(data);
+            
+            switch(message.type) {
+                case 'join':
+                    handleJoin(ws, message.roomId);
+                    break;
+                case 'offer':
+                    handleOffer(ws, message);
+                    break;
+                case 'answer':
+                    handleAnswer(ws, message);
+                    break;
+                case 'ice-candidate':
+                    handleIceCandidate(ws, message);
+                    break;
+                case 'screenshot':
+                    handleScreenshot(ws, message);
+                    break;
+                case 'file-start':
+                    handleFileStart(ws, message);
+                    break;
+                default:
+                    console.log('Unknown message type:', message.type);
+            }
+        } catch (e) {
+            console.error('Error handling message:', e);
         }
-    } catch (e) {
-        console.error('Error handling message:', e);
+    } else {
+        // Handle binary data (file chunks)
+        handleFileChunk(ws, data);
     }
 }
 
@@ -98,12 +103,42 @@ function handleScreenshot(ws, message) {
     broadcastToRoom(ws, message, ws.roomId);
 }
 
-function broadcastToRoom(sender, message, roomId) {
+function handleFileStart(ws, message) {
+    ws.currentFile = {
+        name: message.fileName,
+        size: message.fileSize,
+        receivedSize: 0
+    };
+    broadcastToRoom(ws, message, ws.roomId);
+}
+
+function handleFileChunk(ws, data) {
+    if (ws.currentFile) {
+        ws.currentFile.receivedSize += data.length;
+        broadcastToRoom(ws, data, ws.roomId, true);
+        
+        if (ws.currentFile.receivedSize >= ws.currentFile.size) {
+            // File transfer completed
+            const completeMessage = JSON.stringify({
+                type: 'file-complete',
+                fileName: ws.currentFile.name
+            });
+            broadcastToRoom(ws, completeMessage, ws.roomId);
+            delete ws.currentFile;
+        }
+    }
+}
+
+function broadcastToRoom(sender, message, roomId, isBinary = false) {
     const room = rooms.get(roomId);
     if (room) {
         room.forEach(client => {
             if (client !== sender && client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify(message));
+                if (isBinary) {
+                    client.send(message, { binary: true });
+                } else {
+                    client.send(typeof message === 'string' ? message : JSON.stringify(message));
+                }
             }
         });
     }
