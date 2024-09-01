@@ -1,15 +1,11 @@
-import http from 'http';
-import express from 'express';
-import { WebSocket, WebSocketServer } from 'ws';
-import crypto from 'crypto';
-
+const http = require("http");
+const express = require("express");
+const WebSocket = require("ws");
 const app = express();
 app.use(express.static("public"));
-
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
-
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
@@ -17,49 +13,45 @@ server.on('upgrade', (request, socket, head) => {
     });
 });
 
-server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+server.listen(PORT);
 
 const usersInChat = new Map();
 const pictureReceivers = new Map(); 
-let keepAliveId = null;
+let keepAliveId;
 
-wss.on("connection", (ws) => {
-    const userID = crypto.randomUUID();  
-
-    ws.on("message", (data) => {
+wss.on("connection", function (ws) {
+    const userID = generateUniqueID();  
+    ws.on("message", data => {
         handleMessage(ws, data, userID);
     });
-
     ws.on("close", () => {
         handleDisconnect(userID);
         ws.removeAllListeners(); 
     });
-
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
 });
 
 wss.on("close", () => {
-    if (keepAliveId) {
-        clearInterval(keepAliveId);
-        keepAliveId = null;
-    }
+    clearInterval(keepAliveId);
+    keepAliveId = null;
 });
 
-// Add route to check Node.js version
-app.get('/node-version', (req, res) => {
-    res.send(`Node.js version: ${process.version}`);
-});
+function generateUniqueID() {
+    return Math.random().toString(36).substr(2, 9);
+}
 
-const handleMessage = (ws, data, userID) => {
+function handleMessage(ws, data, userID) {
     try {
-        const messageData = JSON.parse(data.toString());
+        const messageData = JSON.parse(data);
+        
         if (messageData.command === 'Picture Receiver') {
             pictureReceivers.set(userID, ws);
-        } else if (messageData.type === 'screenshot' && messageData.data && typeof messageData.data === 'string' && messageData.data.startsWith('data:image/png;base64')) {
+        } else if (messageData.command && messageData.value !== undefined) {
+            // If the message has a command and value format, broadcast to all clients
+            broadcastToAll(JSON.stringify(messageData));
+        } else if (messageData.type === 'screenshot' && messageData.data.startsWith('data:image/png;base64')) {
             broadcastToPictureReceivers({
                 type: 'screenshot',
                 action: messageData.action,
@@ -74,15 +66,15 @@ const handleMessage = (ws, data, userID) => {
                 data: messageData.data
             });
         } else {
-            broadcastToAllExceptPictureReceivers(ws, JSON.stringify(messageData), true);
+            // For all other messages, broadcast only to picture receivers
+            broadcastToPictureReceivers(messageData);
         }
     } catch (e) {
-        console.error('Error parsing or processing message:', e);
-        console.error('Raw message data:', data);
+        console.error('Error parsing data:', e);
     }
-};
+}
 
-const broadcastToPictureReceivers = (message) => {
+function broadcastToPictureReceivers(message) {
     const data = JSON.stringify(message);
     pictureReceivers.forEach((ws, userId) => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -91,22 +83,24 @@ const broadcastToPictureReceivers = (message) => {
             });
         }
     });
-};
+}
 
-const broadcastToAllExceptPictureReceivers = (senderWs, message, includeSelf) => {
+function broadcastToAll(message) {
     wss.clients.forEach(client => {
-        if (!pictureReceivers.has(client) && client.readyState === WebSocket.OPEN && (includeSelf || client !== senderWs)) {
-            client.send(message);
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message, error => {
+                if (error) console.error("Error broadcasting message:", error);
+            });
         }
     });
-};
+}
 
-const handleDisconnect = (userID) => {
+function handleDisconnect(userID) {
     usersInChat.delete(userID);
     pictureReceivers.delete(userID);
-};
+}
 
-const keepServerAlive = () => {
+function keepServerAlive() {
     keepAliveId = setInterval(() => {
         wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
@@ -114,4 +108,4 @@ const keepServerAlive = () => {
             }
         });
     }, 30000);
-};
+}
