@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Theo dõi Camera Giao thông</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f0f0; }
+        h1, h2 { text-align: center; color: #333; }
+        .group { margin-bottom: 30px; }
+        .cameras-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
+        .camera-container { background-color: white; border-radius: 8px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .camera-image { width: 100%; height: auto; border-radius: 4px; cursor: zoom-in; }
+        button { background-color: #4CAF50; border: none; color: white; padding: 10px 20px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer; border-radius: 4px; }
+        button:hover { background-color: #45a049; }
+        #refreshAll { display: block; margin: 20px auto; }
+        .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; background-color: rgba(0,0,0,0.9); }
+        .modal-content { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 90%; max-height: 90%; object-fit: contain; }
+        .close { position: absolute; top: 15px; right: 35px; color: #f1f1f1; font-size: 40px; font-weight: bold; cursor: pointer; }
+        @media (max-width: 768px) {
+            .cameras-grid { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+        }
+    </style>
+</head>
+<body>
+    <h1>Theo dõi Camera Giao thông</h1>
+    <div id="cameraGroups"></div>
+    <button id="refreshAll">Làm mới tất cả</button>
+    
+    <div id="imageModal" class="modal">
+        <span class="close">&times;</span>
+        <img class="modal-content" id="modalImage">
+    </div>
+
+    <script>
+        async function loadCameraGroups() {
+            const response = await fetch('/data');
+            const cameraGroups = await response.json();
+            const container = document.getElementById('cameraGroups');
+            container.innerHTML = cameraGroups.map(group => `
+                <div class="group">
+                    <h2>${group.name}</h2>
+                    <div class="cameras-grid">
+                    ${group.cameras.map(camera => `
+                        <div class="camera-container">
+                            <h3>${camera.name}</h3>
+                            <img src="/image/${camera.id}" id="camera${camera.id}" alt="${camera.name}" class="camera-image">
+                            <br>
+                            <button onclick="refreshImage('${camera.id}')">Làm mới</button>
+                        </div>
+                    `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function refreshImage(id) {
+            const img = document.getElementById('camera' + id);
+            img.src = '/image/' + id + '?' + new Date().getTime();
+        }
+
+        function refreshAllImages() {
+            document.querySelectorAll('.camera-image').forEach(img => {
+                const id = img.id.replace('camera', '');
+                refreshImage(id);
+            });
+        }
+        
+        const modal = document.getElementById('imageModal');
+        const modalImg = document.getElementById('modalImage');
+        const closeBtn = document.getElementsByClassName('close')[0];
+
+        document.addEventListener('click', function(e) {
+            if (e.target && e.target.classList.contains('camera-image')) {
+                modal.style.display = 'block';
+                modalImg.src = e.target.src;
+                fitImageToScreen();
+            }
+        });
+
+        closeBtn.onclick = function() {
+            modal.style.display = 'none';
+        }
+
+        function fitImageToScreen() {
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+            const imageAspectRatio = modalImg.naturalWidth / modalImg.naturalHeight;
+            const viewportAspectRatio = viewportWidth / viewportHeight;
+
+            if (imageAspectRatio > viewportAspectRatio) {
+                modalImg.style.width = '90vw';
+                modalImg.style.height = 'auto';
+            } else {
+                modalImg.style.width = 'auto';
+                modalImg.style.height = '90vh';
+            }
+        }
+
+        window.addEventListener('resize', fitImageToScreen);
+        document.getElementById('refreshAll').addEventListener('click', refreshAllImages);
+
+        loadCameraGroups();
+    </script>
+</body>
+</html>
