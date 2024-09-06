@@ -14,8 +14,6 @@ const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-// Serve static files from the root directory
-app.use(express.static(__dirname));
 
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
@@ -170,10 +168,7 @@ app.get('/', (req, res) => {
     res.status(200).send('');
 });
 
-
-app.use('/camera', express.static(path.join(__dirname, 'public')));
-
-// Các route khác
+// Chỉ phục vụ index.html khi truy cập /camera
 app.get('/camera', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
