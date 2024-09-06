@@ -166,10 +166,14 @@ async function fetchImage(id) {
 
 // Routes
 app.get('/', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     res.status(200).send('');
 });
 
 
+app.use('/camera', express.static(path.join(__dirname, 'public')));
+
+// Các route khác
 app.get('/camera', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
