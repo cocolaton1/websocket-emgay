@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Client Monitor</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.1/moment.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        h1 {
+            color: #333;
+        }
+        #clientList {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .client-card {
+            background-color: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            width: 300px;
+        }
+        .client-card h2 {
+            margin-top: 0;
+            color: #2c3e50;
+        }
+        .client-info {
+            margin-bottom: 10px;
+        }
+        .client-info strong {
+            color: #34495e;
+        }
+    </style>
+</head>
+<body>
+    <h1>Client Monitor</h1>
+    <div id="clientList"></div>
+
+    <script>
+        const clientList = document.getElementById('clientList');
+        const ws = new WebSocket(`ws://${window.location.host}`);
+
+        ws.onopen = () => {
+            console.log('Connected to server');
+            ws.send(JSON.stringify({type: 'monitor'}));
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'clientUpdate') {
+                updateClientList(data.clients);
+            }
+        };
+
+        function updateClientList(clients) {
+            clientList.innerHTML = '';
+            clients.forEach(client => {
+                const card = document.createElement('div');
+                card.className = 'client-card';
+                card.innerHTML = `
+                    <h2>Client ID: ${client.id.substr(0, 8)}...</h2>
+                    <div class="client-info"><strong>IP:</strong> ${client.info.ip}</div>
+                    <div class="client-info"><strong>Browser:</strong> ${client.info.userAgent.browser}</div>
+                    <div class="client-info"><strong>OS:</strong> ${client.info.userAgent.os}</div>
+                    <div class="client-info"><strong>Device:</strong> ${client.info.userAgent.device}</div>
+                    <div class="client-info"><strong>Location:</strong> ${client.info.geoLocation ? `${client.info.geoLocation.city}, ${client.info.geoLocation.country}` : 'Unknown'}</div>
+                    <div class="client-info"><strong>Connected:</strong> ${moment(client.info.connectTime).fromNow()}</div>
+                    <div class="client-info"><strong>Last Active:</strong> ${moment(client.info.lastActiveTime).fromNow()}</div>
+                `;
+                clientList.appendChild(card);
+            });
+        }
+
+        // Cập nhật thời gian mỗi phút
+        setInterval(() => {
+            const timeElements = document.querySelectorAll('.client-info strong');
+            timeElements.forEach(el => {
+                if (el.textContent === 'Connected:' || el.textContent === 'Last Active:') {
+                    const timeString = el.nextSibling.textContent.trim();
+                    const time = moment(timeString, 'YYYY-MM-DD HH:mm:ss');
+                    el.nextSibling.textContent = ' ' + time.fromNow();
+                }
+            });
+        }, 60000);
+    </script>
+</body>
+</html>
