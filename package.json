@@ -1,20 +1,19 @@
 {
-  "name": "Socket-Server-Template",
+  "name": "Socket-and-Camera-Server",
   "version": "1.0.0",
-  "description": "Web Socket Node Server Example",
-  "main": "main.js",
-  "author": "Torin Blankensmith",
-  "license": "MIT",
-  "private": false,
+  "description": "Web Socket and Camera Viewer Node Server",
+  "main": "server.js",
+  "type": "module",
   "scripts": {
-    "start": "node ./main.js",
-    "dev": "NODE_ENV=development PORT=5000 node ./main.js"
+    "start": "node server.js",
+    "dev": "NODE_ENV=development PORT=5000 node server.js"
   },
   "engines": {
-    "node": ">=8.9.0"
+    "node": ">=14.0.0"
   },
   "dependencies": {
     "express": "^4.17.1",
-    "ws": "^8.2.2"
+    "ws": "^8.2.2",
+    "node-fetch": "^3.2.0"
   }
 }
