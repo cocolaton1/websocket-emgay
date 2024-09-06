@@ -165,6 +165,11 @@ async function fetchImage(id) {
 }
 
 // Routes
+app.get('/', (req, res) => {
+    res.status(200).send('');
+});
+
+
 app.get('/camera', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
