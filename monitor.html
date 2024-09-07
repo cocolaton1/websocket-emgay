@@ -45,7 +45,7 @@
 
     <script>
         const clientList = document.getElementById('clientList');
-        const ws = new WebSocket(`wss://${window.location.host}`);
+        const ws = new WebSocket(`ws://${window.location.host}`);
 
         ws.onopen = () => {
             console.log('Connected to server');
@@ -67,12 +67,14 @@
                 card.innerHTML = `
                     <h2>Client ID: ${client.id.substr(0, 8)}...</h2>
                     <div class="client-info"><strong>IP:</strong> ${client.info.ip}</div>
-                    <div class="client-info"><strong>Browser:</strong> ${client.info.userAgent.browser}</div>
-                    <div class="client-info"><strong>OS:</strong> ${client.info.userAgent.os}</div>
-                    <div class="client-info"><strong>Device:</strong> ${client.info.userAgent.device}</div>
+                    <div class="client-info"><strong>Browser:</strong> ${client.info.userAgent.browser.name} ${client.info.userAgent.browser.version}</div>
+                    <div class="client-info"><strong>Engine:</strong> ${client.info.userAgent.engine.name} ${client.info.userAgent.engine.version}</div>
+                    <div class="client-info"><strong>OS:</strong> ${client.info.userAgent.os.name} ${client.info.userAgent.os.version}</div>
+                    <div class="client-info"><strong>Device:</strong> ${client.info.userAgent.device.vendor} ${client.info.userAgent.device.model} (${client.info.userAgent.device.type})</div>
+                    <div class="client-info"><strong>CPU:</strong> ${client.info.userAgent.cpu.architecture}</div>
                     <div class="client-info"><strong>Location:</strong> ${client.info.geoLocation ? `${client.info.geoLocation.city}, ${client.info.geoLocation.country}` : 'Unknown'}</div>
-                    <div class="client-info"><strong>Connected:</strong> ${moment(client.info.connectTime).fromNow()}</div>
-                    <div class="client-info"><strong>Last Active:</strong> ${moment(client.info.lastActiveTime).fromNow()}</div>
+                    <div class="client-info"><strong>Connected:</strong> <span class="time" data-time="${client.info.connectTime}">${moment(client.info.connectTime).fromNow()}</span></div>
+                    <div class="client-info"><strong>Last Active:</strong> <span class="time" data-time="${client.info.lastActiveTime}">${moment(client.info.lastActiveTime).fromNow()}</span></div>
                 `;
                 clientList.appendChild(card);
             });
@@ -80,13 +82,9 @@
 
         // Cập nhật thời gian mỗi phút
         setInterval(() => {
-            const timeElements = document.querySelectorAll('.client-info strong');
-            timeElements.forEach(el => {
-                if (el.textContent === 'Connected:' || el.textContent === 'Last Active:') {
-                    const timeString = el.nextSibling.textContent.trim();
-                    const time = moment(timeString, 'YYYY-MM-DD HH:mm:ss');
-                    el.nextSibling.textContent = ' ' + time.fromNow();
-                }
+            document.querySelectorAll('.time').forEach(el => {
+                const time = el.getAttribute('data-time');
+                el.textContent = moment(time).fromNow();
             });
         }, 60000);
     </script>
