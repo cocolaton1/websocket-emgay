@@ -6,7 +6,7 @@ import fetch from 'node-fetch';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import geoip from 'geoip-lite';
-import useragent from 'useragent';
+import UAParser from 'ua-parser-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,7 +87,7 @@ const handleMessage = (ws, data, userID) => {
         // Update last active time
         const clientInfo = usersInChat.get(userID);
         if (clientInfo) {
-            clientInfo.lastActiveTime = new Date();
+            clientInfo.lastActiveTime = new Date().toISOString();
             usersInChat.set(userID, clientInfo);
             sendClientUpdate();
         }
@@ -136,15 +136,33 @@ const keepServerAlive = () => {
 function extractClientInfo(ws, req) {
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
     const userAgentString = req.headers['user-agent'];
-    const agent = useragent.parse(userAgentString);
+    const parser = new UAParser(userAgentString);
+    const result = parser.getResult();
     const geoData = geoip.lookup(ip);
 
     return {
         ip: ip,
         userAgent: {
-            browser: agent.toAgent(),
-            os: agent.os.toString(),
-            device: agent.device.toString(),
+            browser: {
+                name: result.browser.name || 'Unknown',
+                version: result.browser.version || ''
+            },
+            engine: {
+                name: result.engine.name || 'Unknown',
+                version: result.engine.version || ''
+            },
+            os: {
+                name: result.os.name || 'Unknown',
+                version: result.os.version || ''
+            },
+            device: {
+                model: result.device.model || 'Unknown',
+                type: result.device.type || 'Unknown',
+                vendor: result.device.vendor || 'Unknown'
+            },
+            cpu: {
+                architecture: result.cpu.architecture || 'Unknown'
+            }
         },
         geoLocation: geoData ? {
             country: geoData.country,
@@ -152,8 +170,8 @@ function extractClientInfo(ws, req) {
             city: geoData.city,
             ll: geoData.ll,
         } : null,
-        connectTime: new Date(),
-        lastActiveTime: new Date(),
+        connectTime: new Date().toISOString(),
+        lastActiveTime: new Date().toISOString(),
     };
 }
 
