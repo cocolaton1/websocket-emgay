@@ -57,8 +57,8 @@ wss.on("connection", (ws) => {
     const userID = crypto.randomUUID();  
     usersInChat.set(userID, ws);
     
-    ws.on("message", (data) => {
-        handleMessage(ws, data, userID);
+    ws.on("message", async (data) => {
+        await handleMessage(ws, data, userID);
     });
     
     ws.on("close", () => {
@@ -78,7 +78,6 @@ wss.on("close", () => {
         clearInterval(keepAliveId);
         keepAliveId = null;
     }
-    saveMessages();
 });
 
 app.get('/node-version', (req, res) => {
@@ -95,7 +94,7 @@ app.get('/api/messages', (req, res) => {
     res.json(chatMessages.slice(Math.max(0, chatMessages.length - offset - limit), chatMessages.length - offset).reverse());
 });
 
-const handleMessage = (ws, data, userID) => {
+const handleMessage = async (ws, data, userID) => {
     if (data.toString() === 'Message Receiver') {
         messageReceivers.set(userID, ws);
         console.log(`User ${userID} registered as Message Receiver`);
@@ -114,6 +113,7 @@ const handleMessage = (ws, data, userID) => {
                     timestamp: new Date().toISOString()
                 };
                 chatMessages.push(newMessage);
+                await saveMessages();  // Lưu tin nhắn ngay lập tức
                 broadcastToAllExceptSpecialReceivers(ws, JSON.stringify({ type: 'chat', message: newMessage }), true);
             } else if (messageData.command === 'Picture Receiver') {
                 pictureReceivers.set(userID, ws);
@@ -201,8 +201,7 @@ const keepServerAlive = () => {
     }, 30000);
 };
 
-process.on('SIGINT', () => {
-    saveMessages().then(() => {
-        process.exit(0);
-    });
+process.on('SIGINT', async () => {
+    await saveMessages();
+    process.exit(0);
 });
