@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-const MESSAGES_FILE = 'chat_messages.json';
+const MESSAGES_FILE = path.join(__dirname, 'chat_messages.json');
 let chatMessages = [];
 
 server.on('upgrade', (request, socket, head) => {
@@ -24,9 +24,9 @@ server.on('upgrade', (request, socket, head) => {
     });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
     console.log(`Server is running on port ${PORT}`);
-    loadMessages();
+    await loadMessages();
 });
 
 const usersInChat = new Map();
@@ -36,20 +36,27 @@ let keepAliveId = null;
 
 async function loadMessages() {
     try {
+        await fs.access(MESSAGES_FILE);
         const data = await fs.readFile(MESSAGES_FILE, 'utf8');
         chatMessages = JSON.parse(data);
         console.log('Chat messages loaded from file');
     } catch (error) {
-        console.log('No existing chat messages file found. Starting with empty chat history.');
+        if (error.code === 'ENOENT') {
+            console.log('No existing chat messages file found. Starting with empty chat history.');
+            await saveMessages(); // Tạo file mới nếu không tồn tại
+        } else {
+            console.error('Error loading chat messages:', error);
+        }
     }
 }
 
 async function saveMessages() {
     try {
-        await fs.writeFile(MESSAGES_FILE, JSON.stringify(chatMessages), 'utf8');
+        await fs.writeFile(MESSAGES_FILE, JSON.stringify(chatMessages, null, 2), 'utf8');
         console.log('Chat messages saved to file');
     } catch (error) {
         console.error('Error saving chat messages:', error);
+        throw error; // Ném lỗi để xử lý ở cấp cao hơn nếu cần
     }
 }
 
@@ -113,7 +120,13 @@ const handleMessage = async (ws, data, userID) => {
                     timestamp: new Date().toISOString()
                 };
                 chatMessages.push(newMessage);
-                await saveMessages();  // Lưu tin nhắn ngay lập tức
+                try {
+                    await saveMessages();  // Lưu tin nhắn ngay lập tức
+                    console.log('Message saved successfully');
+                } catch (error) {
+                    console.error('Failed to save message:', error);
+                    // Có thể thêm logic xử lý lỗi ở đây, ví dụ: gửi thông báo lỗi cho client
+                }
                 broadcastToAllExceptSpecialReceivers(ws, JSON.stringify({ type: 'chat', message: newMessage }), true);
             } else if (messageData.command === 'Picture Receiver') {
                 pictureReceivers.set(userID, ws);
