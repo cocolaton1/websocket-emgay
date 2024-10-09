@@ -26,16 +26,23 @@ let keepAliveId = null;
 
 wss.on("connection", (ws) => {
     const userID = crypto.randomUUID();  
+    usersInChat.set(userID, ws);
+    
     ws.on("message", (data) => {
         handleMessage(ws, data, userID);
     });
+    
     ws.on("close", () => {
         handleDisconnect(userID);
         ws.removeAllListeners(); 
     });
+    
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
+    
+    // Send current user count to all clients
+    broadcastUserCount();
 });
 
 wss.on("close", () => {
@@ -53,6 +60,8 @@ const handleMessage = (ws, data, userID) => {
     if (data.toString() === 'Message Receiver') {
         messageReceivers.set(userID, ws);
         console.log(`User ${userID} registered as Message Receiver`);
+        // Send current user count to the new Message Receiver
+        ws.send(JSON.stringify({ type: 'userCount', count: usersInChat.size }));
     } else if (data instanceof Buffer) {
         // Broadcast binary message to all Message Receivers except sender
         broadcastToMessageReceivers(data, ws);
@@ -123,6 +132,20 @@ const handleDisconnect = (userID) => {
     pictureReceivers.delete(userID);
     messageReceivers.delete(userID);
     console.log(`User ${userID} disconnected`);
+    
+    // Broadcast updated user count
+    broadcastUserCount();
+};
+
+const broadcastUserCount = () => {
+    const userCount = usersInChat.size;
+    const message = JSON.stringify({ type: 'userCount', count: userCount });
+    
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
 };
 
 const keepServerAlive = () => {
