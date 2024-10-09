@@ -3,9 +3,14 @@ import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.static("public"));
+app.use(express.static(path.join(__dirname, 'public')));
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
@@ -78,6 +83,10 @@ wss.on("close", () => {
 
 app.get('/node-version', (req, res) => {
     res.send(`Node.js version: ${process.version}`);
+});
+
+app.get('/chat.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'chat.html'));
 });
 
 app.get('/api/messages', (req, res) => {
