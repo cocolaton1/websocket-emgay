@@ -54,8 +54,8 @@ const handleMessage = (ws, data, userID) => {
         messageReceivers.set(userID, ws);
         console.log(`User ${userID} registered as Message Receiver`);
     } else if (data instanceof Buffer) {
-        // Broadcast binary message to all Message Receivers
-        broadcastToMessageReceivers(data);
+        // Broadcast binary message to all Message Receivers except sender
+        broadcastToMessageReceivers(data, ws);
     } else {
         try {
             const messageData = JSON.parse(data.toString());
@@ -80,7 +80,7 @@ const handleMessage = (ws, data, userID) => {
                     data: messageData.data
                 });
             } else {
-                broadcastToAllExceptSpecialReceivers(ws, JSON.stringify(messageData), true);
+                broadcastToAllExceptSpecialReceivers(ws, JSON.stringify(messageData), false);
             }
         } catch (e) {
             console.error('Error parsing or processing message:', e);
@@ -89,9 +89,9 @@ const handleMessage = (ws, data, userID) => {
     }
 };
 
-const broadcastToMessageReceivers = (binaryData) => {
+const broadcastToMessageReceivers = (binaryData, senderWs) => {
     messageReceivers.forEach((ws, userId) => {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws !== senderWs && ws.readyState === WebSocket.OPEN) {
             ws.send(binaryData, { binary: true }, error => {
                 if (error) console.error("Error sending binary message to receiver:", error);
             });
