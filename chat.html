@@ -239,7 +239,7 @@
         const messagesPerLoad = 20;
 
         function connectWebSocket() {
-            socket = new WebSocket(`ws://${window.location.host}`);
+            socket = new WebSocket(`wss://${window.location.host}`);
 
             socket.onopen = () => {
                 console.log('Kết nối WebSocket đã được thiết lập');
