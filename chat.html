@@ -7,7 +7,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
     <style>
-        body {
+                body {
             font-family: 'Roboto', sans-serif;
             background-color: #121212;
             color: #e0e0e0;
@@ -207,7 +207,7 @@
             </div>
         </div>
     </div>
-<div class="emoji-picker" id="emojiPicker">
+    <div class="emoji-picker" id="emojiPicker">
         <div class="emoji-list">
             <span class="emoji">😊</span>
             <span class="emoji">😂</span>
@@ -239,7 +239,7 @@
         const messagesPerLoad = 20;
 
         function connectWebSocket() {
-            socket = new WebSocket('wss://websocket-emgay-7f053909350a.herokuapp.com/');
+            socket = new WebSocket(`ws://${window.location.host}`);
 
             socket.onopen = () => {
                 console.log('Kết nối WebSocket đã được thiết lập');
