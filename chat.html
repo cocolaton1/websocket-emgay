@@ -7,7 +7,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
     <style>
-                body {
+                        body {
             font-family: 'Roboto', sans-serif;
             background-color: #121212;
             color: #e0e0e0;
@@ -285,13 +285,18 @@
                 if (jsonData.type === 'userCount') {
                     updateUserCount(jsonData.count);
                 } else if (jsonData.type === 'chat') {
-                    displayMessage(jsonData.message);
+                    const messageObj = {
+                        content: typeof jsonData.message === 'object' ? jsonData.message.content : jsonData.message,
+                        userId: jsonData.message.userId || 'other',
+                        timestamp: jsonData.message.timestamp || new Date().toISOString()
+                    };
+                    displayMessage(messageObj);
                 } else {
                     console.log('Unknown message type:', jsonData.type);
                 }
             } catch (e) {
                 console.error('Error parsing JSON:', e);
-                displayMessage({ content: jsonString, type: 'received', timestamp: new Date().toISOString() });
+                console.log('Raw message:', jsonString);
             }
         }
 
@@ -334,7 +339,17 @@
             
             const timeElement = document.createElement('div');
             timeElement.classList.add('message-time');
-            timeElement.textContent = new Date(messageObj.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            let timeString = 'Invalid Date';
+            try {
+                const date = new Date(messageObj.timestamp);
+                if (!isNaN(date.getTime())) {
+                    timeString = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                }
+            } catch (e) {
+                console.error('Error parsing timestamp:', e);
+            }
+            timeElement.textContent = timeString;
             
             messageElement.appendChild(contentElement);
             messageElement.appendChild(timeElement);
@@ -379,8 +394,16 @@
         function sendMessage(message = null) {
             const messageToSend = message || messageInput.value.trim();
             if (messageToSend && isConnected) {
-                socket.send(JSON.stringify({ type: 'chat', message: messageToSend }));
-                displayMessage({ content: messageToSend, userId: 'self', timestamp: new Date().toISOString() });
+                const messageObj = {
+                    type: 'chat',
+                    message: {
+                        content: messageToSend,
+                        userId: 'self',
+                        timestamp: new Date().toISOString()
+                    }
+                };
+                socket.send(JSON.stringify(messageObj));
+                displayMessage(messageObj.message);
                 messageInput.value = '';
             } else if (!isConnected) {
                 showToast('Không thể gửi tin nhắn. Vui lòng chờ kết nối lại.', 'error');
