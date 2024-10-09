@@ -108,18 +108,26 @@ async function handleMessage(ws, data, userID) {
           await messagesCollection.insertOne(newMessage);
           console.log('Message saved to MongoDB:', newMessage);
           
-          // Broadcast the message to all connected clients
-          broadcastToAll(JSON.stringify({ type: 'chat', message: newMessage }));
+          // Broadcast the message to all connected clients except the sender
+          broadcastToOthers(JSON.stringify({ type: 'chat', message: newMessage }), ws);
         } catch (error) {
           console.error('Error saving message to MongoDB:', error);
         }
       } else {
-        broadcastToAll(JSON.stringify(messageData));
+        broadcastToOthers(JSON.stringify(messageData), ws);
       }
     } catch (e) {
       console.error('Error parsing or processing message:', e);
     }
   }
+}
+
+function broadcastToOthers(message, senderWs) {
+  wss.clients.forEach(client => {
+    if (client !== senderWs && client.readyState === 1) {
+      client.send(message);
+    }
+  });
 }
 
 function broadcastToAll(message) {
