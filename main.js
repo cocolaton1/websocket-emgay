@@ -96,6 +96,11 @@ const handleMessage = (ws, data, userID) => {
 
         // Handle different message types
         switch (messageData.type) {
+
+            case 'controller_register':
+                handleControllerRegister(ws, userID, messageData);
+                break;
+                
             case 'monitor':
                 handleMonitorConnection(ws, userID);
                 break;
@@ -158,6 +163,21 @@ const handleMessage = (ws, data, userID) => {
         console.error(`[${new Date().toISOString()}] Error processing message from ${userID}:`, e);
         console.error('Raw message data:', data.toString().substring(0, 200) + '...');
     }
+};
+
+
+const handleControllerRegister = (ws, userID, messageData) => {
+    controllerClients.set(userID, {
+        ws: ws,
+        registered: Date.now()
+    });
+    
+    const connection = connections.get(userID);
+    if (connection) {
+        connection.type = 'controller';
+    }
+    
+    console.log(`[${new Date().toISOString()}] Controller registered: ${userID}`);
 };
 
 // Message handlers
